@@ -255,10 +255,13 @@ set(arm_SOURCES
   arm/unordsf2vfp.S
   ${GENERIC_SOURCES})
 
+set(avr_SOURCES
+  ${GENERIC_SOURCES})
+
 add_custom_target(builtins)
 
 if (NOT WIN32)
-  foreach (arch x86_64 i386 i686 arm)
+  foreach (arch x86_64 i386 i686 arm avr)
     if (CAN_TARGET_${arch})
       # Filter out generic versions of routines that are re-implemented in
       # architecture specific manner.  This prevents multiple definitions of the

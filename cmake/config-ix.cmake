@@ -122,6 +122,7 @@ endmacro()
 macro(detect_target_arch)
   check_symbol_exists(__arm__ "" __ARM)
   check_symbol_exists(__aarch64__ "" __AARCH64)
+  check_symbol_exists(__avr__ "" __AVR)
   check_symbol_exists(__x86_64__ "" __X86_64)
   check_symbol_exists(__i686__ "" __I686)
   check_symbol_exists(__i386__ "" __I386)
@@ -131,6 +132,8 @@ macro(detect_target_arch)
     add_default_target_arch(arm)
   elseif(__AARCH64)
     add_default_target_arch(aarch64)
+  elseif(__AVR)
+    add_default_target_arch(avr)
   elseif(__X86_64)
     add_default_target_arch(x86_64)
   elseif(__I686)
@@ -144,11 +147,12 @@ macro(detect_target_arch)
   endif()
 endmacro()
 
-# Detect whether the current target platform is 32-bit or 64-bit, and setup
-# the correct commandline flags needed to attempt to target 32-bit and 64-bit.
-if (NOT CMAKE_SIZEOF_VOID_P EQUAL 4 AND
+# Detect whether the current target platform is 16-bit, 32-bit, or 64-bit, and setup
+# the correct commandline flags needed to attempt to target 16-bit, 32-bit and 64-bit.
+if (NOT CMAKE_SIZEOF_VOID_P EQUAL 2 AND
+    NOT CMAKE_SIZEOF_VOID_P EQUAL 4 AND
     NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
-  message(FATAL_ERROR "Please use architecture with 4 or 8 byte pointers.")
+  message(FATAL_ERROR "Please use architecture with 2, 4, or 8 byte pointers.")
 endif()
 
 # Generate the COMPILER_RT_SUPPORTED_ARCH list.
@@ -191,6 +195,8 @@ else()
     test_target_arch(aarch32 "" "-march=armv8-a")
   elseif("${COMPILER_RT_TEST_TARGET_ARCH}" MATCHES "aarch64")
     test_target_arch(aarch64 "" "-march=armv8-a")
+  elseif("${COMPILER_RT_TEST_TARGET_ARCH}" MATCHES "avr")
+    test_target_arch(avr "" "-march=avr5")
   endif()
   set(COMPILER_RT_OS_SUFFIX "")
 endif()
@@ -233,7 +239,7 @@ filter_available_targets(DFSAN_SUPPORTED_ARCH x86_64 mips64 mips64el)
 filter_available_targets(LSAN_SUPPORTED_ARCH x86_64 mips64 mips64el)
 filter_available_targets(MSAN_SUPPORTED_ARCH x86_64 mips64 mips64el)
 filter_available_targets(PROFILE_SUPPORTED_ARCH x86_64 i386 i686 arm mips mips64
-  mipsel mips64el aarch64 powerpc64 powerpc64le)
+  mipsel mips64el aarch64 avr powerpc64 powerpc64le)
 filter_available_targets(TSAN_SUPPORTED_ARCH x86_64 mips64 mips64el)
 filter_available_targets(UBSAN_SUPPORTED_ARCH x86_64 i386 i686 arm aarch64 mips
   mipsel mips64 mips64el powerpc64 powerpc64le)
