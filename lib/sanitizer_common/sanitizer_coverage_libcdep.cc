@@ -63,7 +63,7 @@ static atomic_uintptr_t coverage_counter;
 // dump current memory layout to another file.
 
 static bool cov_sandboxed = false;
-static int cov_fd = kInvalidFd;
+static fd_t cov_fd = kInvalidFd;
 static unsigned int cov_max_block_size = 0;
 static bool coverage_enabled = false;
 static const char *coverage_dir;
@@ -109,7 +109,9 @@ class CoverageData {
 
   // Maximal size pc array may ever grow.
   // We MmapNoReserve this space to ensure that the array is contiguous.
-  static const uptr kPcArrayMaxSize = FIRST_32_SECOND_64(1 << 26, 1 << 27);
+  static const uptr kPcArrayMaxSize = FIRST_32_SECOND_64(
+      1 << (SANITIZER_ANDROID ? 24 : (SANITIZER_WINDOWS ? 27 : 26)),
+      1 << 27);
   // The amount file mapping for the pc array is grown by.
   static const uptr kPcArrayMmapSize = 64 * 1024;
 
@@ -123,7 +125,7 @@ class CoverageData {
   // Current file mapped size of the pc array.
   uptr pc_array_mapped_size;
   // Descriptor of the file mapped pc array.
-  int pc_fd;
+  fd_t pc_fd;
 
   // Vector of coverage guard arrays, protected by mu.
   InternalMmapVectorNoCtor<s32*> guard_array_vec;
@@ -176,7 +178,7 @@ void CoverageData::DirectOpen() {
   internal_snprintf((char *)path.data(), path.size(), "%s/%zd.sancov.raw",
                     coverage_dir, internal_getpid());
   pc_fd = OpenFile(path.data(), RdWr);
-  if (internal_iserror(pc_fd)) {
+  if (pc_fd == kInvalidFd) {
     Report("Coverage: failed to open %s for reading/writing\n", path.data());
     Die();
   }
@@ -210,8 +212,9 @@ void CoverageData::Enable() {
   tr_event_array = reinterpret_cast<u32 *>(MmapNoReserveOrDie(
       sizeof(tr_event_array[0]) * kTrEventArrayMaxSize + GetMmapGranularity(),
       "CovInit::tr_event_array"));
-  Mprotect(reinterpret_cast<uptr>(&tr_event_array[kTrEventArrayMaxSize]),
-           GetMmapGranularity());
+  MprotectNoAccess(
+      reinterpret_cast<uptr>(&tr_event_array[kTrEventArrayMaxSize]),
+      GetMmapGranularity());
   tr_event_array_size = kTrEventArrayMaxSize;
   tr_event_pointer = tr_event_array;
 
@@ -229,22 +232,22 @@ void CoverageData::InitializeGuardArray(s32 *guards) {
 
 void CoverageData::Disable() {
   if (pc_array) {
-    internal_munmap(pc_array, sizeof(uptr) * kPcArrayMaxSize);
+    UnmapOrDie(pc_array, sizeof(uptr) * kPcArrayMaxSize);
     pc_array = nullptr;
   }
   if (cc_array) {
-    internal_munmap(cc_array, sizeof(uptr *) * kCcArrayMaxSize);
+    UnmapOrDie(cc_array, sizeof(uptr *) * kCcArrayMaxSize);
     cc_array = nullptr;
   }
   if (tr_event_array) {
-    internal_munmap(tr_event_array,
-                    sizeof(tr_event_array[0]) * kTrEventArrayMaxSize +
-                        GetMmapGranularity());
+    UnmapOrDie(tr_event_array,
+               sizeof(tr_event_array[0]) * kTrEventArrayMaxSize +
+                   GetMmapGranularity());
     tr_event_array = nullptr;
     tr_event_pointer = nullptr;
   }
   if (pc_fd != kInvalidFd) {
-    internal_close(pc_fd);
+    CloseFile(pc_fd);
     pc_fd = kInvalidFd;
   }
 }
@@ -263,8 +266,9 @@ void CoverageData::ReInit() {
       // In memory-mapped mode we must extend the new file to the known array
       // size.
       uptr size = atomic_load(&pc_array_size, memory_order_relaxed);
+      uptr npcs = size / sizeof(uptr);
       Enable();
-      if (size) Extend(size);
+      if (size) Extend(npcs);
       if (coverage_enabled) CovUpdateMapping(coverage_dir);
     } else {
       Enable();
@@ -515,15 +519,15 @@ struct CovHeader {
 
 static void CovWritePacked(int pid, const char *module, const void *blob,
                            unsigned int blob_size) {
-  if (cov_fd < 0) return;
+  if (cov_fd == kInvalidFd) return;
   unsigned module_name_length = internal_strlen(module);
   CovHeader header = {pid, module_name_length, blob_size};
 
   if (cov_max_block_size == 0) {
     // Writing to a file. Just go ahead.
-    internal_write(cov_fd, &header, sizeof(header));
-    internal_write(cov_fd, module, module_name_length);
-    internal_write(cov_fd, blob, blob_size);
+    WriteToFile(cov_fd, &header, sizeof(header));
+    WriteToFile(cov_fd, module, module_name_length);
+    WriteToFile(cov_fd, blob, blob_size);
   } else {
     // Writing to a socket. We want to split the data into appropriately sized
     // blocks.
@@ -546,8 +550,7 @@ static void CovWritePacked(int pid, const char *module, const void *blob,
       internal_memcpy(block_data_begin, blob_pos, payload_size);
       blob_pos += payload_size;
       ((CovHeader *)block.data())->data_length = payload_size;
-      internal_write(cov_fd, block.data(),
-                     header_size_with_module + payload_size);
+      WriteToFile(cov_fd, block.data(), header_size_with_module + payload_size);
     }
   }
 }
@@ -556,7 +559,7 @@ static void CovWritePacked(int pid, const char *module, const void *blob,
 // If packed = true and name == 0: <pid>.<sancov>.<packed>.
 // If packed = true and name != 0: <name>.<sancov>.<packed> (name is
 // user-supplied).
-static int CovOpenFile(InternalScopedString *path, bool packed,
+static fd_t CovOpenFile(InternalScopedString *path, bool packed,
                        const char *name, const char *extension = "sancov") {
   path->clear();
   if (!packed) {
@@ -570,11 +573,11 @@ static int CovOpenFile(InternalScopedString *path, bool packed,
     else
       path->append("%s/%s.%s.packed", coverage_dir, name, extension);
   }
-  uptr fd = OpenFile(path->data(), WrOnly);
-  if (internal_iserror(fd)) {
-    Report("SanitizerCoverage: failed to open %s for writing\n", path->data());
-    return -1;
-  }
+  error_t err;
+  fd_t fd = OpenFile(path->data(), WrOnly, &err);
+  if (fd == kInvalidFd)
+    Report("SanitizerCoverage: failed to open %s for writing (reason: %d)\n",
+           path->data(), err);
   return fd;
 }
 
@@ -594,34 +597,35 @@ void CoverageData::DumpTrace() {
     out.append("%s 0x%zx\n", module_name, module_address);
   }
   InternalScopedString path(kMaxPathLength);
-  int fd = CovOpenFile(&path, false, "trace-points");
-  if (fd < 0) return;
-  internal_write(fd, out.data(), out.length());
-  internal_close(fd);
+  fd_t fd = CovOpenFile(&path, false, "trace-points");
+  if (fd == kInvalidFd) return;
+  WriteToFile(fd, out.data(), out.length());
+  CloseFile(fd);
 
   fd = CovOpenFile(&path, false, "trace-compunits");
-  if (fd < 0) return;
+  if (fd == kInvalidFd) return;
   out.clear();
   for (uptr i = 0; i < comp_unit_name_vec.size(); i++)
     out.append("%s\n", comp_unit_name_vec[i].copied_module_name);
-  internal_write(fd, out.data(), out.length());
-  internal_close(fd);
+  WriteToFile(fd, out.data(), out.length());
+  CloseFile(fd);
 
   fd = CovOpenFile(&path, false, "trace-events");
-  if (fd < 0) return;
+  if (fd == kInvalidFd) return;
   uptr bytes_to_write = max_idx * sizeof(tr_event_array[0]);
   u8 *event_bytes = reinterpret_cast<u8*>(tr_event_array);
   // The trace file could be huge, and may not be written with a single syscall.
   while (bytes_to_write) {
-    uptr actually_written = internal_write(fd, event_bytes, bytes_to_write);
-    if (actually_written <= bytes_to_write) {
+    uptr actually_written;
+    if (WriteToFile(fd, event_bytes, bytes_to_write, &actually_written) &&
+        actually_written <= bytes_to_write) {
       bytes_to_write -= actually_written;
       event_bytes += actually_written;
     } else {
       break;
     }
   }
-  internal_close(fd);
+  CloseFile(fd);
   VReport(1, " CovDump: Trace: %zd PCs written\n", size());
   VReport(1, " CovDump: Trace: %zd Events written\n", max_idx);
 }
@@ -659,10 +663,10 @@ void CoverageData::DumpCallerCalleePairs() {
     }
   }
   InternalScopedString path(kMaxPathLength);
-  int fd = CovOpenFile(&path, false, "caller-callee");
-  if (fd < 0) return;
-  internal_write(fd, out.data(), out.length());
-  internal_close(fd);
+  fd_t fd = CovOpenFile(&path, false, "caller-callee");
+  if (fd == kInvalidFd) return;
+  WriteToFile(fd, out.data(), out.length());
+  CloseFile(fd);
   VReport(1, " CovDump: %zd caller-callee pairs written\n", total);
 }
 
@@ -693,11 +697,11 @@ void CoverageData::DumpCounters() {
     CHECK_LE(r.beg, r.end);
     CHECK_LE(r.end, size());
     const char *base_name = StripModuleName(r.copied_module_name);
-    int fd =
+    fd_t fd =
         CovOpenFile(&path, /* packed */ false, base_name, "counters-sancov");
-    if (fd < 0) return;
-    internal_write(fd, bitset.data() + r.beg, r.end - r.beg);
-    internal_close(fd);
+    if (fd == kInvalidFd) return;
+    WriteToFile(fd, bitset.data() + r.beg, r.end - r.beg);
+    CloseFile(fd);
     VReport(1, " CovDump: %zd counters written for '%s'\n", r.end - r.beg,
             base_name);
   }
@@ -721,10 +725,10 @@ void CoverageData::DumpAsBitSet() {
         n_set_bits++;
     }
     const char *base_name = StripModuleName(r.copied_module_name);
-    int fd = CovOpenFile(&path, /* packed */ false, base_name, "bitset-sancov");
-    if (fd < 0) return;
-    internal_write(fd, out.data() + r.beg, r.end - r.beg);
-    internal_close(fd);
+    fd_t fd = CovOpenFile(&path, /* packed */false, base_name, "bitset-sancov");
+    if (fd == kInvalidFd) return;
+    WriteToFile(fd, out.data() + r.beg, r.end - r.beg);
+    CloseFile(fd);
     VReport(1,
             " CovDump: bitset of %zd bits written for '%s', %zd bits are set\n",
             r.end - r.beg, base_name, n_set_bits);
@@ -769,22 +773,22 @@ void CoverageData::DumpOffsets() {
 
     const char *module_name = StripModuleName(r.copied_module_name);
     if (cov_sandboxed) {
-      if (cov_fd >= 0) {
+      if (cov_fd != kInvalidFd) {
         CovWritePacked(internal_getpid(), module_name, offsets.data(),
                        offsets.size() * sizeof(offsets[0]));
         VReport(1, " CovDump: %zd PCs written to packed file\n", num_offsets);
       }
     } else {
       // One file per module per process.
-      int fd = CovOpenFile(&path, false /* packed */, module_name);
-      if (fd < 0) continue;
-      internal_write(fd, offsets.data(), offsets.size() * sizeof(offsets[0]));
-      internal_close(fd);
+      fd_t fd = CovOpenFile(&path, false /* packed */, module_name);
+      if (fd == kInvalidFd) continue;
+      WriteToFile(fd, offsets.data(), offsets.size() * sizeof(offsets[0]));
+      CloseFile(fd);
       VReport(1, " CovDump: %s: %zd PCs written\n", path.data(), num_offsets);
     }
   }
-  if (cov_fd >= 0)
-    internal_close(cov_fd);
+  if (cov_fd != kInvalidFd)
+    CloseFile(cov_fd);
 }
 
 void CoverageData::DumpAll() {
@@ -803,18 +807,19 @@ void CovPrepareForSandboxing(__sanitizer_sandbox_arguments *args) {
   if (!coverage_enabled) return;
   cov_sandboxed = args->coverage_sandboxed;
   if (!cov_sandboxed) return;
-  cov_fd = args->coverage_fd;
   cov_max_block_size = args->coverage_max_block_size;
-  if (cov_fd < 0) {
+  if (args->coverage_fd >= 0) {
+    cov_fd = (fd_t)args->coverage_fd;
+  } else {
     InternalScopedString path(kMaxPathLength);
     // Pre-open the file now. The sandbox won't allow us to do it later.
     cov_fd = CovOpenFile(&path, true /* packed */, 0);
   }
 }
 
-int MaybeOpenCovFile(const char *name) {
+fd_t MaybeOpenCovFile(const char *name) {
   CHECK(name);
-  if (!coverage_enabled) return -1;
+  if (!coverage_enabled) return kInvalidFd;
   InternalScopedString path(kMaxPathLength);
   return CovOpenFile(&path, true /* packed */, name);
 }
@@ -889,7 +894,7 @@ __sanitizer_cov_module_init(s32 *guards, uptr npcs, u8 *counters,
 }
 SANITIZER_INTERFACE_ATTRIBUTE
 sptr __sanitizer_maybe_open_cov_file(const char *name) {
-  return MaybeOpenCovFile(name);
+  return (sptr)MaybeOpenCovFile(name);
 }
 SANITIZER_INTERFACE_ATTRIBUTE
 uptr __sanitizer_get_total_unique_coverage() {
@@ -926,4 +931,7 @@ SANITIZER_INTERFACE_ATTRIBUTE
 uptr __sanitizer_update_counter_bitset_and_clear_counters(u8 *bitset) {
   return coverage_data.Update8bitCounterBitsetAndClearCounters(bitset);
 }
+// Default empty implementation (weak). Users should redefine it.
+SANITIZER_INTERFACE_ATTRIBUTE SANITIZER_WEAK_ATTRIBUTE
+void __sanitizer_cov_trace_cmp() {}
 }  // extern "C"

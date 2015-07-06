@@ -96,7 +96,8 @@ const char *Symbolizer::ModuleNameOwner::GetOwnedCopy(const char *str) {
 }
 
 Symbolizer::Symbolizer(IntrusiveList<SymbolizerTool> tools)
-    : module_names_(&mu_), tools_(tools), start_hook_(0), end_hook_(0) {}
+    : module_names_(&mu_), n_modules_(0), modules_fresh_(false), tools_(tools),
+      start_hook_(0), end_hook_(0) {}
 
 Symbolizer::SymbolizerScope::SymbolizerScope(const Symbolizer *sym)
     : sym_(sym) {
@@ -107,84 +108,6 @@ Symbolizer::SymbolizerScope::SymbolizerScope(const Symbolizer *sym)
 Symbolizer::SymbolizerScope::~SymbolizerScope() {
   if (sym_->end_hook_)
     sym_->end_hook_();
-}
-
-SymbolizedStack *Symbolizer::SymbolizePC(uptr addr) {
-  BlockingMutexLock l(&mu_);
-  const char *module_name;
-  uptr module_offset;
-  SymbolizedStack *res = SymbolizedStack::New(addr);
-  if (!PlatformFindModuleNameAndOffsetForAddress(addr, &module_name,
-                                                 &module_offset))
-    return res;
-  // Always fill data about module name and offset.
-  res->info.FillModuleInfo(module_name, module_offset);
-  for (auto iter = Iterator(&tools_); iter.hasNext();) {
-    auto *tool = iter.next();
-    SymbolizerScope sym_scope(this);
-    if (tool->SymbolizePC(addr, res)) {
-      return res;
-    }
-  }
-  return res;
-}
-
-bool Symbolizer::SymbolizeData(uptr addr, DataInfo *info) {
-  BlockingMutexLock l(&mu_);
-  const char *module_name;
-  uptr module_offset;
-  if (!PlatformFindModuleNameAndOffsetForAddress(addr, &module_name,
-                                                 &module_offset))
-    return false;
-  info->Clear();
-  info->module = internal_strdup(module_name);
-  info->module_offset = module_offset;
-  for (auto iter = Iterator(&tools_); iter.hasNext();) {
-    auto *tool = iter.next();
-    SymbolizerScope sym_scope(this);
-    if (tool->SymbolizeData(addr, info)) {
-      return true;
-    }
-  }
-  return true;
-}
-
-bool Symbolizer::GetModuleNameAndOffsetForPC(uptr pc, const char **module_name,
-                                             uptr *module_address) {
-  BlockingMutexLock l(&mu_);
-  const char *internal_module_name = nullptr;
-  if (!PlatformFindModuleNameAndOffsetForAddress(pc, &internal_module_name,
-                                                 module_address))
-    return false;
-
-  if (module_name)
-    *module_name = module_names_.GetOwnedCopy(internal_module_name);
-  return true;
-}
-
-void Symbolizer::Flush() {
-  BlockingMutexLock l(&mu_);
-  for (auto iter = Iterator(&tools_); iter.hasNext();) {
-    auto *tool = iter.next();
-    SymbolizerScope sym_scope(this);
-    tool->Flush();
-  }
-}
-
-const char *Symbolizer::Demangle(const char *name) {
-  BlockingMutexLock l(&mu_);
-  for (auto iter = Iterator(&tools_); iter.hasNext();) {
-    auto *tool = iter.next();
-    SymbolizerScope sym_scope(this);
-    if (const char *demangled = tool->Demangle(name))
-      return demangled;
-  }
-  return PlatformDemangle(name);
-}
-
-void Symbolizer::PrepareForSandboxing() {
-  BlockingMutexLock l(&mu_);
-  PlatformPrepareForSandboxing();
 }
 
 }  // namespace __sanitizer

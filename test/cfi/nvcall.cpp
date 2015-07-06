@@ -13,18 +13,23 @@
 // RUN: %clangxx -o %t %s
 // RUN: %t 2>&1 | FileCheck --check-prefix=NCFI %s
 
+// RUN: %clangxx_cfi_diag -o %t %s
+// RUN: %t 2>&1 | FileCheck --check-prefix=CFI-DIAG %s
+
 // Tests that the CFI mechanism crashes the program when making a non-virtual
 // call to an object of the wrong class, by casting a pointer to such an object
 // and attempting to make a call through it.
+
+// REQUIRES: cxxabi
 
 #include <stdio.h>
 #include "utils.h"
 
 struct A {
-  virtual void f();
+  virtual void v();
 };
 
-void A::f() {}
+void A::v() {}
 
 struct B {
   void f();
@@ -57,6 +62,8 @@ int main() {
   // NCFI: 1
   fprintf(stderr, "1\n");
 
+  // CFI-DIAG: runtime error: control flow integrity check for type 'B' failed during non-virtual call
+  // CFI-DIAG-NEXT: note: vtable is of type 'A'
   ((B *)a)->f(); // UB here
 
   // CFI-NOT: 2
