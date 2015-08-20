@@ -33,6 +33,12 @@ set(SANITIZER_SOURCES
   sanitizer_thread_registry.cc
   sanitizer_win.cc)
 
+# Libc functions stubs. These sources should be linked instead of
+# SANITIZER_LIBCDEP_SOURCES when sanitizer_common library must not depend on
+# libc.
+set(SANITIZER_NOLIBC_SOURCES
+  sanitizer_common_nolibc.cc)
+
 set(SANITIZER_LIBCDEP_SOURCES
   sanitizer_common_libcdep.cc
   sanitizer_coverage_libcdep.cc
@@ -43,7 +49,6 @@ set(SANITIZER_LIBCDEP_SOURCES
   sanitizer_stoptheworld_linux_libcdep.cc
   sanitizer_symbolizer_libcdep.cc
   sanitizer_symbolizer_posix_libcdep.cc
-  sanitizer_symbolizer_process_libcdep.cc
   sanitizer_unwind_linux_libcdep.cc)
 
 # Explicitly list all sanitizer_common headers. Not all of these are
@@ -97,7 +102,6 @@ set(SANITIZER_HEADERS
   sanitizer_symbolizer_internal.h
   sanitizer_symbolizer_libbacktrace.h
   sanitizer_symbolizer_mac.h
-  sanitizer_symbolizer_win.h
   sanitizer_syscall_generic.inc
   sanitizer_syscall_linux_x86_64.inc
   sanitizer_thread_registry.h)
@@ -144,6 +148,10 @@ else()
   add_compiler_rt_object_libraries(RTSanitizerCommon
     ARCHS ${SANITIZER_COMMON_SUPPORTED_ARCH}
     SOURCES ${SANITIZER_SOURCES} CFLAGS ${SANITIZER_CFLAGS}
+    DEFS ${SANITIZER_COMMON_DEFINITIONS})
+  add_compiler_rt_object_libraries(RTSanitizerCommonNoLibc
+    ARCHS ${SANITIZER_COMMON_SUPPORTED_ARCH}
+    SOURCES ${SANITIZER_NOLIBC_SOURCES} CFLAGS ${SANITIZER_CFLAGS}
     DEFS ${SANITIZER_COMMON_DEFINITIONS})
   add_compiler_rt_object_libraries(RTSanitizerCommonLibc
     ARCHS ${SANITIZER_COMMON_SUPPORTED_ARCH}

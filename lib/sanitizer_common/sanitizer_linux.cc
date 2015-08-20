@@ -15,7 +15,6 @@
 #include "sanitizer_platform.h"
 #if SANITIZER_FREEBSD || SANITIZER_LINUX
 
-#include "sanitizer_allocator_internal.h"
 #include "sanitizer_common.h"
 #include "sanitizer_flags.h"
 #include "sanitizer_internal_defs.h"
@@ -74,11 +73,6 @@ extern char **environ;  // provided by crt1
 #include <sys/signal.h>
 #endif
 
-#if SANITIZER_ANDROID
-#include <android/log.h>
-#include <sys/system_properties.h>
-#endif
-
 #if SANITIZER_LINUX
 // <linux/time.h>
 struct kernel_timeval {
@@ -110,7 +104,7 @@ namespace __sanitizer {
 
 // --------------- sanitizer_libc.h
 uptr internal_mmap(void *addr, uptr length, int prot, int flags, int fd,
-                   u64 offset) {
+                   OFF_T offset) {
 #if SANITIZER_FREEBSD || SANITIZER_LINUX_USES_64BIT_SYSCALLS
   return internal_syscall(SYSCALL(mmap), (uptr)addr, length, prot, flags, fd,
                           offset);
@@ -375,8 +369,8 @@ const char *GetEnv(const char *name) {
   if (!inited) {
     inited = true;
     uptr environ_size;
-    len = ReadFileToBuffer("/proc/self/environ",
-                           &environ, &environ_size, 1 << 26);
+    if (!ReadFileToBuffer("/proc/self/environ", &environ, &environ_size, &len))
+      environ = nullptr;
   }
   if (!environ || len == 0) return 0;
   uptr namelen = internal_strlen(name);
@@ -405,9 +399,13 @@ extern "C" {
 static void ReadNullSepFileToArray(const char *path, char ***arr,
                                    int arr_size) {
   char *buff;
-  uptr buff_size = 0;
+  uptr buff_size;
+  uptr buff_len;
   *arr = (char **)MmapOrDie(arr_size * sizeof(char *), "NullSepFileArray");
-  ReadFileToBuffer(path, &buff, &buff_size, 1024 * 1024);
+  if (!ReadFileToBuffer(path, &buff, &buff_size, &buff_len, 1024 * 1024)) {
+    (*arr)[0] = nullptr;
+    return;
+  }
   (*arr)[0] = buff;
   int count, i;
   for (count = 1, i = 1; ; i++) {
@@ -418,7 +416,7 @@ static void ReadNullSepFileToArray(const char *path, char ***arr,
       count++;
     }
   }
-  (*arr)[count] = 0;
+  (*arr)[count] = nullptr;
 }
 #endif
 
@@ -732,6 +730,21 @@ uptr ReadBinaryName(/*out*/char *buf, uptr buf_len) {
   return module_name_len;
 }
 
+uptr ReadLongProcessName(/*out*/ char *buf, uptr buf_len) {
+#if SANITIZER_LINUX
+  char *tmpbuf;
+  uptr tmpsize;
+  uptr tmplen;
+  if (ReadFileToBuffer("/proc/self/cmdline", &tmpbuf, &tmpsize, &tmplen,
+                       1024 * 1024)) {
+    internal_strncpy(buf, tmpbuf, buf_len);
+    UnmapOrDie(tmpbuf, tmpsize);
+    return internal_strlen(buf);
+  }
+#endif
+  return ReadBinaryName(buf, buf_len);
+}
+
 // Match full names of the form /path/to/base_name{-,.}*
 bool LibraryNameIs(const char *full_name, const char *base_name) {
   const char *name = full_name;
@@ -913,38 +926,66 @@ uptr internal_clone(int (*fn)(void *), void *child_stack, int flags, void *arg,
                        : "memory", "$29" );
   return res;
 }
+#elif defined(__aarch64__)
+uptr internal_clone(int (*fn)(void *), void *child_stack, int flags, void *arg,
+                    int *parent_tidptr, void *newtls, int *child_tidptr) {
+  long long res;
+  if (!fn || !child_stack)
+    return -EINVAL;
+  CHECK_EQ(0, (uptr)child_stack % 16);
+  child_stack = (char *)child_stack - 2 * sizeof(unsigned long long);
+  ((unsigned long long *)child_stack)[0] = (uptr)fn;
+  ((unsigned long long *)child_stack)[1] = (uptr)arg;
+
+  register int (*__fn)(void *)  __asm__("x0") = fn;
+  register void *__stack __asm__("x1") = child_stack;
+  register int   __flags __asm__("x2") = flags;
+  register void *__arg   __asm__("x3") = arg;
+  register int  *__ptid  __asm__("x4") = parent_tidptr;
+  register void *__tls   __asm__("x5") = newtls;
+  register int  *__ctid  __asm__("x6") = child_tidptr;
+
+  __asm__ __volatile__(
+                       "mov x0,x2\n" /* flags  */
+                       "mov x2,x4\n" /* ptid  */
+                       "mov x3,x5\n" /* tls  */
+                       "mov x4,x6\n" /* ctid  */
+                       "mov x8,%9\n" /* clone  */
+
+                       "svc 0x0\n"
+
+                       /* if (%r0 != 0)
+                        *   return %r0;
+                        */
+                       "cmp x0, #0\n"
+                       "bne 1f\n"
+
+                       /* In the child, now. Call "fn(arg)". */
+                       "ldp x1, x0, [sp], #16\n"
+                       "blr x1\n"
+
+                       /* Call _exit(%r0).  */
+                       "mov x8, %10\n"
+                       "svc 0x0\n"
+                     "1:\n"
+
+                       : "=r" (res)
+                       : "i"(-EINVAL),
+                         "r"(__fn), "r"(__stack), "r"(__flags), "r"(__arg),
+                         "r"(__ptid), "r"(__tls), "r"(__ctid),
+                         "i"(__NR_clone), "i"(__NR_exit)
+                       : "x30", "memory");
+  return res;
+}
 #endif  // defined(__x86_64__) && SANITIZER_LINUX
 
 #if SANITIZER_ANDROID
-static atomic_uint8_t android_log_initialized;
-
-void AndroidLogInit() {
-  atomic_store(&android_log_initialized, 1, memory_order_release);
-}
-// This thing is not, strictly speaking, async signal safe, but it does not seem
-// to cause any issues. Alternative is writing to log devices directly, but
-// their location and message format might change in the future, so we'd really
-// like to avoid that.
-void AndroidLogWrite(const char *buffer) {
-  if (!atomic_load(&android_log_initialized, memory_order_acquire))
-    return;
-
-  char *copy = internal_strdup(buffer);
-  char *p = copy;
-  char *q;
-  // __android_log_write has an implicit message length limit.
-  // Print one line at a time.
-  do {
-    q = internal_strchr(p, '\n');
-    if (q) *q = '\0';
-    __android_log_write(ANDROID_LOG_INFO, NULL, p);
-    if (q) p = q + 1;
-  } while (q);
-  InternalFree(copy);
-}
-
+#define PROP_VALUE_MAX 92
+extern "C" SANITIZER_WEAK_ATTRIBUTE int __system_property_get(const char *name,
+                                                              char *value);
 void GetExtraActivationFlags(char *buf, uptr size) {
   CHECK(size > PROP_VALUE_MAX);
+  CHECK(&__system_property_get);
   __system_property_get("asan.options", buf);
 }
 
@@ -992,6 +1033,8 @@ AndroidApiLevel AndroidGetApiLevel() {
 
 bool IsDeadlySignal(int signum) {
   if (common_flags()->handle_abort && signum == SIGABRT)
+    return true;
+  if (common_flags()->handle_sigfpe && signum == SIGFPE)
     return true;
   return (signum == SIGSEGV || signum == SIGBUS) && common_flags()->handle_segv;
 }

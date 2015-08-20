@@ -70,8 +70,7 @@ append_list_if(COMPILER_RT_HAS_LIBRT rt ASAN_DYNAMIC_LIBS)
 append_list_if(COMPILER_RT_HAS_LIBM m ASAN_DYNAMIC_LIBS)
 append_list_if(COMPILER_RT_HAS_LIBPTHREAD pthread ASAN_DYNAMIC_LIBS)
 append_list_if(COMPILER_RT_HAS_LIBSTDCXX stdc++ ASAN_DYNAMIC_LIBS)
-
-append_list_if(ANDROID log ASAN_DYNAMIC_LIBS)
+append_list_if(COMPILER_RT_HAS_LIBLOG log ASAN_DYNAMIC_LIBS)
 
 # Compile ASan sources into an object library.
 if(APPLE)
@@ -112,7 +111,8 @@ endif()
 add_custom_target(asan)
 if(APPLE)
   foreach (os ${SANITIZER_COMMON_SUPPORTED_OS})
-    add_compiler_rt_darwin_dynamic_runtime(clang_rt.asan_${os}_dynamic ${os}
+    add_compiler_rt_darwin_runtime(clang_rt.asan_${os}_dynamic ${os}
+      SHARED
       ARCHS ${ASAN_SUPPORTED_ARCH}
       SOURCES $<TARGET_OBJECTS:RTAsan.${os}>
               $<TARGET_OBJECTS:RTInterception.${os}>

@@ -80,6 +80,22 @@ SANITIZER_INTERFACE_ATTRIBUTE THREADLOCAL dfsan_label __dfsan_arg_tls[64];
 // | reserved by kernel |
 // +--------------------+ 0x0000000000
 
+// On Linux/AArch64 (39-bit VMA), memory is laid out as follow:
+//
+// +--------------------+ 0x8000000000 (top of memory)
+// | application memory |
+// +--------------------+ 0x7000008000 (kAppAddr)
+// |                    |
+// |       unused       |
+// |                    |
+// +--------------------+ 0x1200000000 (kUnusedAddr)
+// |    union table     |
+// +--------------------+ 0x1000000000 (kUnionTableAddr)
+// |   shadow memory    |
+// +--------------------+ 0x0000010000 (kShadowAddr)
+// | reserved by kernel |
+// +--------------------+ 0x0000000000
+
 typedef atomic_dfsan_label dfsan_union_table_t[kNumLabels][kNumLabels];
 
 #if defined(__x86_64__)
@@ -92,6 +108,11 @@ static const uptr kShadowAddr = 0x10000;
 static const uptr kUnionTableAddr = 0x2000000000;
 static const uptr kUnusedAddr = kUnionTableAddr + sizeof(dfsan_union_table_t);
 static const uptr kAppAddr = 0xF000008000;
+#elif defined(__aarch64__)
+static const uptr kShadowAddr = 0x10000;
+static const uptr kUnionTableAddr = 0x1000000000;
+static const uptr kUnusedAddr = kUnionTableAddr + sizeof(dfsan_union_table_t);
+static const uptr kAppAddr = 0x7000008000;
 #else
 # error "DFSan not supported for this platform!"
 #endif
@@ -325,10 +346,16 @@ static void RegisterDfsanFlags(FlagParser *parser, Flags *f) {
 }
 
 static void InitializeFlags() {
-  FlagParser parser;
-  RegisterDfsanFlags(&parser, &flags());
+  SetCommonFlagsDefaults();
   flags().SetDefaults();
+
+  FlagParser parser;
+  RegisterCommonFlags(&parser);
+  RegisterDfsanFlags(&parser, &flags());
   parser.ParseString(GetEnv("DFSAN_OPTIONS"));
+  SetVerbosity(common_flags()->verbosity);
+  if (Verbosity()) ReportUnrecognizedFlags();
+  if (common_flags()->help) parser.PrintFlagDescriptions();
 }
 
 static void dfsan_fini() {

@@ -19,6 +19,7 @@ function(add_compiler_rt_object_libraries name)
       set(libname "${name}.${os}")
       set(libnames ${libnames} ${libname})
       set(extra_cflags_${libname} ${DARWIN_${os}_CFLAGS})
+      list_union(LIB_ARCHS_${libname} DARWIN_${os}_ARCHS LIB_ARCHS)
     endforeach()
   else()
     foreach(arch ${LIB_ARCHS})
@@ -26,7 +27,7 @@ function(add_compiler_rt_object_libraries name)
       set(libnames ${libnames} ${libname})
       set(extra_cflags_${libname} ${TARGET_${arch}_CFLAGS})
       if(NOT CAN_TARGET_${arch})
-        message(FATAL_ERROR "Archtecture ${arch} can't be targeted")
+        message(FATAL_ERROR "Architecture ${arch} can't be targeted")
         return()
       endif()
     endforeach()
@@ -39,7 +40,8 @@ function(add_compiler_rt_object_libraries name)
     set_property(TARGET ${libname} APPEND PROPERTY
       COMPILE_DEFINITIONS ${LIB_DEFS})
     if(APPLE)
-      set_target_properties(${libname} PROPERTIES OSX_ARCHITECTURES "${LIB_ARCHS}")
+      set_target_properties(${libname} PROPERTIES
+        OSX_ARCHITECTURES "${LIB_ARCHS_${libname}}")
     endif()
   endforeach()
 endfunction()
@@ -80,50 +82,49 @@ macro(add_compiler_rt_runtime name arch type)
       LIBRARY DESTINATION ${COMPILER_RT_LIBRARY_INSTALL_DIR}
       RUNTIME DESTINATION ${COMPILER_RT_LIBRARY_INSTALL_DIR})
   else()
-    message(FATAL_ERROR "Archtecture ${arch} can't be targeted")
+    message(FATAL_ERROR "Architecture ${arch} can't be targeted")
   endif()
 endmacro()
 
-# Same as add_compiler_rt_runtime(... STATIC), but creates a universal library
-# for several architectures.
-# add_compiler_rt_osx_static_runtime(<name> ARCHS <architectures>
-#                                    SOURCES <source files>
-#                                    CFLAGS <compile flags>
-#                                    DEFS <compile definitions>)
-macro(add_compiler_rt_osx_static_runtime name)
-  cmake_parse_arguments(LIB "" "" "ARCHS;SOURCES;CFLAGS;DEFS" ${ARGN})
-  add_library(${name} STATIC ${LIB_SOURCES})
-  set_target_compile_flags(${name} ${LIB_CFLAGS})
-  set_property(TARGET ${name} APPEND PROPERTY
-    COMPILE_DEFINITIONS ${LIB_DEFS})
-  set_target_properties(${name} PROPERTIES
-    OSX_ARCHITECTURES "${LIB_ARCHS}"
-    ARCHIVE_OUTPUT_DIRECTORY ${COMPILER_RT_LIBRARY_OUTPUT_DIR})
-  install(TARGETS ${name}
-    ARCHIVE DESTINATION ${COMPILER_RT_LIBRARY_INSTALL_DIR})
-endmacro()
-
-# Adds dynamic runtime library on osx/iossim, which supports multiple
+# Adds runtime library for darwin platforms, which supports multiple
 # architectures.
-# add_compiler_rt_darwin_dynamic_runtime(<name> <os>
-#                                        ARCHS <architectures>
-#                                        SOURCES <source files>
-#                                        CFLAGS <compile flags>
-#                                        DEFS <compile definitions>
-#                                        LINKFLAGS <link flags>)
-macro(add_compiler_rt_darwin_dynamic_runtime name os)
-  cmake_parse_arguments(LIB "" "" "ARCHS;SOURCES;CFLAGS;DEFS;LINKFLAGS" ${ARGN})
-  add_library(${name} SHARED ${LIB_SOURCES})
-  set_target_compile_flags(${name} ${LIB_CFLAGS} ${DARWIN_${os}_CFLAGS})
-  set_target_link_flags(${name} ${LIB_LINKFLAGS} ${DARWIN_${os}_LINKFLAGS})
-  set_property(TARGET ${name} APPEND PROPERTY
-    COMPILE_DEFINITIONS ${LIB_DEFS})
-  set_target_properties(${name} PROPERTIES
-    OSX_ARCHITECTURES "${LIB_ARCHS}"
-    LIBRARY_OUTPUT_DIRECTORY ${COMPILER_RT_LIBRARY_OUTPUT_DIR})
-  install(TARGETS ${name}
-    LIBRARY DESTINATION ${COMPILER_RT_LIBRARY_INSTALL_DIR})
-endmacro()
+# add_compiler_rt_darwin_runtime(<name> <os>
+#                                STATIC|SHARED
+#                                ARCHS <architectures>
+#                                SOURCES <source files>
+#                                CFLAGS <compile flags>
+#                                DEFS <compile definitions>
+#                                LINKFLAGS <link flags>)
+function(add_compiler_rt_darwin_runtime name os)
+  cmake_parse_arguments(LIB "SHARED;STATIC" "" "ARCHS;SOURCES;CFLAGS;DEFS;LINKFLAGS" ${ARGN})
+  list_union(filtered_arches DARWIN_${os}_ARCHS LIB_ARCHS)
+  # if there are no supported architectures, don't create the library
+  if(filtered_arches)
+    if(LIB_SHARED)
+      add_library(${name} SHARED ${LIB_SOURCES})
+      set_target_properties(${name} PROPERTIES
+        LIBRARY_OUTPUT_DIRECTORY ${COMPILER_RT_LIBRARY_OUTPUT_DIR})
+      install(TARGETS ${name}
+        LIBRARY DESTINATION ${COMPILER_RT_LIBRARY_INSTALL_DIR})
+    elseif(LIB_STATIC)
+      add_library(${name} STATIC ${LIB_SOURCES})
+      set_target_properties(${name} PROPERTIES
+        ARCHIVE_OUTPUT_DIRECTORY ${COMPILER_RT_LIBRARY_OUTPUT_DIR})
+      install(TARGETS ${name}
+        ARCHIVE DESTINATION ${COMPILER_RT_LIBRARY_INSTALL_DIR})
+    else()
+      message(FATAL_ERROR "Must specified SHARED|STATIC to add_compiler_rt_darwin_runtime")
+    endif()
+    
+    set_target_compile_flags(${name} ${LIB_CFLAGS} ${DARWIN_${os}_CFLAGS})
+    set_target_link_flags(${name} ${LIB_LINKFLAGS} ${DARWIN_${os}_LINKFLAGS})
+    set_property(TARGET ${name} APPEND PROPERTY
+      COMPILE_DEFINITIONS ${LIB_DEFS})
+
+    set_target_properties(${name} PROPERTIES
+      OSX_ARCHITECTURES "${filtered_arches}")
+  endif()
+endfunction()
 
 set(COMPILER_RT_TEST_CFLAGS)
 
@@ -258,6 +259,7 @@ macro(add_custom_libcxx name prefix)
     LOG_CONFIGURE 1
     LOG_INSTALL 1
     )
+  set_target_properties(${name} PROPERTIES EXCLUDE_FROM_ALL TRUE)
 
   ExternalProject_Add_Step(${name} force-reconfigure
     DEPENDERS configure

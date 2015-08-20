@@ -117,21 +117,8 @@ void *MmapOrDie(uptr size, const char *mem_type) {
                             PROT_READ | PROT_WRITE,
                             MAP_PRIVATE | MAP_ANON, -1, 0);
   int reserrno;
-  if (internal_iserror(res, &reserrno)) {
-    static int recursion_count;
-    if (recursion_count) {
-      // The Report() and CHECK calls below may call mmap recursively and fail.
-      // If we went into recursion, just die.
-      RawWrite("ERROR: Failed to mmap\n");
-      Die();
-    }
-    recursion_count++;
-    Report("ERROR: %s failed to "
-           "allocate 0x%zx (%zd) bytes of %s (errno: %d)\n",
-           SanitizerToolName, size, size, mem_type, reserrno);
-    DumpProcessMap();
-    CHECK("unable to mmap" && 0);
-  }
+  if (internal_iserror(res, &reserrno))
+    ReportMmapFailureAndDie(size, mem_type, reserrno);
   IncreaseTotalMmap(size);
   return (void *)res;
 }
@@ -240,14 +227,14 @@ void *MapFileToMemory(const char *file_name, uptr *buff_size) {
   return internal_iserror(map) ? 0 : (void *)map;
 }
 
-void *MapWritableFileToMemory(void *addr, uptr size, fd_t fd, uptr offset) {
+void *MapWritableFileToMemory(void *addr, uptr size, fd_t fd, OFF_T offset) {
   uptr flags = MAP_SHARED;
   if (addr) flags |= MAP_FIXED;
   uptr p = internal_mmap(addr, size, PROT_READ | PROT_WRITE, flags, fd, offset);
   int mmap_errno = 0;
   if (internal_iserror(p, &mmap_errno)) {
-    Printf("could not map writable file (%d, %zu, %zu): %zd, errno: %d\n",
-           fd, offset, size, p, mmap_errno);
+    Printf("could not map writable file (%d, %lld, %zu): %zd, errno: %d\n",
+           fd, (long long)offset, size, p, mmap_errno);
     return 0;
   }
   return (void *)p;
@@ -270,6 +257,7 @@ bool MemoryRangeIsAvailable(uptr range_start, uptr range_end) {
   while (proc_maps.Next(&start, &end,
                         /*offset*/0, /*filename*/0, /*filename_size*/0,
                         /*protection*/0)) {
+    if (start == end) continue;  // Empty range.
     CHECK_NE(0, end);
     if (!IntervalsAreSeparate(start, end - 1, range_start, range_end))
       return false;
@@ -293,30 +281,6 @@ void DumpProcessMap() {
 
 const char *GetPwd() {
   return GetEnv("PWD");
-}
-
-char *FindPathToBinary(const char *name) {
-  const char *path = GetEnv("PATH");
-  if (!path)
-    return 0;
-  uptr name_len = internal_strlen(name);
-  InternalScopedBuffer<char> buffer(kMaxPathLength);
-  const char *beg = path;
-  while (true) {
-    const char *end = internal_strchrnul(beg, ':');
-    uptr prefix_len = end - beg;
-    if (prefix_len + name_len + 2 <= kMaxPathLength) {
-      internal_memcpy(buffer.data(), beg, prefix_len);
-      buffer[prefix_len] = '/';
-      internal_memcpy(&buffer[prefix_len + 1], name, name_len);
-      buffer[prefix_len + 1 + name_len] = '\0';
-      if (FileExists(buffer.data()))
-        return internal_strdup(buffer.data());
-    }
-    if (*end == '\0') break;
-    beg = end + 1;
-  }
-  return 0;
 }
 
 bool IsPathSeparator(const char c) {

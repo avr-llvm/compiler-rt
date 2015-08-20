@@ -154,6 +154,12 @@ set(x86_64_SOURCES
   x86_64/floatundixf.S
   ${GENERIC_SOURCES})
 
+if(WIN32)
+  set(x86_64_SOURCES
+      ${x86_64_SOURCES}
+      x86_64/chkstk.S)
+endif()
+
 set(i386_SOURCES
   i386/ashldi3.S
   i386/ashrdi3.S
@@ -171,6 +177,12 @@ set(i386_SOURCES
   i386/umoddi3.S
   ${GENERIC_SOURCES})
 
+if(WIN32)
+  set(i386_SOURCES
+      ${i386_SOURCES}
+      i386/chkstk.S)
+endif()
+
 set(i686_SOURCES
   ${i386_SOURCES})
 
@@ -179,7 +191,9 @@ set(arm_SOURCES
   arm/addsf3vfp.S
   arm/aeabi_dcmp.S
   arm/aeabi_div0.c
+  arm/aeabi_drsub.c
   arm/aeabi_fcmp.S
+  arm/aeabi_frsub.c
   arm/aeabi_idivmod.S
   arm/aeabi_ldivmod.S
   arm/aeabi_memcmp.S
@@ -258,13 +272,29 @@ set(arm_SOURCES
   arm/unordsf2vfp.S
   ${GENERIC_SOURCES})
 
-set(avr_SOURCES
+set(aarch64_SOURCES
+  comparetf2.c
+  extenddftf2.c
+  extendsftf2.c
+  fixtfdi.c
+  fixtfsi.c
+  fixtfti.c
+  fixunstfdi.c
+  fixunstfsi.c
+  fixunstfti.c
+  floatditf.c
+  floatsitf.c
+  floatunditf.c
+  floatunsitf.c
+  multc3.c
+  trunctfdf2.c
+  trunctfsf2.c
   ${GENERIC_SOURCES})
 
 add_custom_target(builtins)
 
-if (NOT WIN32)
-  foreach (arch x86_64 i386 i686 arm avr)
+if (NOT WIN32 OR MINGW)
+  foreach (arch x86_64 i386 i686 arm aarch64 avr)
     if (CAN_TARGET_${arch})
       # Filter out generic versions of routines that are re-implemented in
       # architecture specific manner.  This prevents multiple definitions of the
@@ -277,7 +307,6 @@ if (NOT WIN32)
         endif ()
       endforeach ()
 
-      set_source_files_properties(${${arch}_SOURCES} PROPERTIES LANGUAGE C)
       add_compiler_rt_runtime(clang_rt.builtins-${arch} ${arch} STATIC
                               SOURCES ${${arch}_SOURCES}
                               CFLAGS "-std=c99")

@@ -130,7 +130,7 @@
 #define SANITIZER_USES_UID16_SYSCALLS 0
 #endif
 
-#ifdef __mips__
+#if defined(__mips__) || defined(__aarch64__)
 # define SANITIZER_POINTER_FORMAT_LENGTH FIRST_32_SECOND_64(8, 10)
 #else
 # define SANITIZER_POINTER_FORMAT_LENGTH FIRST_32_SECOND_64(8, 12)
@@ -140,6 +140,17 @@
 #if !defined(HAVE_RPC_XDR_H) && !defined(HAVE_TIRPC_RPC_XDR_H)
 # define HAVE_RPC_XDR_H (SANITIZER_LINUX && !SANITIZER_ANDROID)
 # define HAVE_TIRPC_RPC_XDR_H 0
+#endif
+
+/// \macro MSC_PREREQ
+/// \brief Is the compiler MSVC of at least the specified version?
+/// The common \param version values to check for are:
+///  * 1800: Microsoft Visual Studio 2013 / 12.0
+///  * 1900: Microsoft Visual Studio 2015 / 14.0
+#ifdef _MSC_VER
+# define MSC_PREREQ(version) (_MSC_VER >= (version))
+#else
+# define MSC_PREREQ(version) 0
 #endif
 
 #endif // SANITIZER_PLATFORM_H

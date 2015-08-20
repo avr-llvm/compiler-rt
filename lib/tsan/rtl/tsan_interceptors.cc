@@ -38,6 +38,13 @@ using namespace __tsan;  // NOLINT
 #define stderr __stderrp
 #endif
 
+#if SANITIZER_LINUX || SANITIZER_FREEBSD
+#define PTHREAD_CREATE_DETACHED 1
+#elif SANITIZER_MAC
+#define PTHREAD_CREATE_DETACHED 2
+#endif
+
+
 #ifdef __mips__
 const int kSigCount = 129;
 #else
@@ -58,6 +65,12 @@ struct ucontext_t {
   // The size is determined by looking at sizeof of real ucontext_t on linux.
   u64 opaque[936 / sizeof(u64) + 1];
 };
+#endif
+
+#if defined(__x86_64__) || defined(__mips__)
+#define PTHREAD_ABI_BASE  "GLIBC_2.3.2"
+#elif defined(__aarch64__)
+#define PTHREAD_ABI_BASE  "GLIBC_2.17"
 #endif
 
 extern "C" int pthread_attr_init(void *attr);
@@ -599,20 +612,6 @@ TSAN_INTERCEPTOR(void*, memcpy, void *dst, const void *src, uptr size) {
   return internal_memcpy(dst, src, size);
 }
 
-TSAN_INTERCEPTOR(int, memcmp, const void *s1, const void *s2, uptr n) {
-  SCOPED_TSAN_INTERCEPTOR(memcmp, s1, s2, n);
-  int res = 0;
-  uptr len = 0;
-  for (; len < n; len++) {
-    if ((res = ((const unsigned char *)s1)[len] -
-               ((const unsigned char *)s2)[len]))
-      break;
-  }
-  MemoryAccessRange(thr, pc, (uptr)s1, len < n ? len + 1 : n, false);
-  MemoryAccessRange(thr, pc, (uptr)s2, len < n ? len + 1 : n, false);
-  return res;
-}
-
 TSAN_INTERCEPTOR(void*, memmove, void *dst, void *src, uptr n) {
   SCOPED_TSAN_INTERCEPTOR(memmove, dst, src, n);
   MemoryAccessRange(thr, pc, (uptr)dst, n, true);
@@ -880,7 +879,8 @@ TSAN_INTERCEPTOR(int, pthread_create,
     ThreadIgnoreEnd(thr, pc);
   }
   if (res == 0) {
-    int tid = ThreadCreate(thr, pc, *(uptr*)th, detached);
+    int tid = ThreadCreate(thr, pc, *(uptr*)th,
+                           detached == PTHREAD_CREATE_DETACHED);
     CHECK_NE(tid, 0);
     // Synchronization on p.tid serves two purposes:
     // 1. ThreadCreate must finish before the new thread starts.
@@ -2153,6 +2153,10 @@ struct dl_iterate_phdr_data {
   void *data;
 };
 
+static bool IsAppNotRodata(uptr addr) {
+  return IsAppMem(addr) && *(u64*)MemToShadow(addr) != kShadowRodata;
+}
+
 static int dl_iterate_phdr_cb(__sanitizer_dl_phdr_info *info, SIZE_T size,
                               void *data) {
   dl_iterate_phdr_data *cbdata = (dl_iterate_phdr_data *)data;
@@ -2161,13 +2165,13 @@ static int dl_iterate_phdr_cb(__sanitizer_dl_phdr_info *info, SIZE_T size,
   // inside of dynamic linker, so we "unpoison" it here in order to not
   // produce false reports. Ignoring malloc/free in dlopen/dlclose is not enough
   // because some libc functions call __libc_dlopen.
-  bool reset = info && IsAppMem((uptr)info->dlpi_name) &&
-      *(u64*)MemToShadow((uptr)info->dlpi_name) != kShadowRodata;
-  if (reset)
+  if (info && IsAppNotRodata((uptr)info->dlpi_name))
     MemoryResetRange(cbdata->thr, cbdata->pc, (uptr)info->dlpi_name,
                      internal_strlen(info->dlpi_name));
   int res = cbdata->cb(info, size, cbdata->data);
-  if (reset)
+  // Perform the check one more time in case info->dlpi_name was overwritten
+  // by user callback.
+  if (info && IsAppNotRodata((uptr)info->dlpi_name))
     MemoryResetRange(cbdata->thr, cbdata->pc, (uptr)info->dlpi_name,
                      internal_strlen(info->dlpi_name));
   return res;
@@ -2457,7 +2461,6 @@ void InitializeInterceptors() {
   // We need to setup it early, because functions like dlsym() can call it.
   REAL(memset) = internal_memset;
   REAL(memcpy) = internal_memcpy;
-  REAL(memcmp) = internal_memcmp;
 
   // Instruct libc malloc to consume less memory.
 #if !SANITIZER_FREEBSD
@@ -2496,7 +2499,6 @@ void InitializeInterceptors() {
   TSAN_INTERCEPT(memset);
   TSAN_INTERCEPT(memcpy);
   TSAN_INTERCEPT(memmove);
-  TSAN_INTERCEPT(memcmp);
   TSAN_INTERCEPT(strchr);
   TSAN_INTERCEPT(strchrnul);
   TSAN_INTERCEPT(strrchr);
@@ -2508,12 +2510,12 @@ void InitializeInterceptors() {
   TSAN_INTERCEPT(pthread_join);
   TSAN_INTERCEPT(pthread_detach);
 
-  TSAN_INTERCEPT_VER(pthread_cond_init, "GLIBC_2.3.2");
-  TSAN_INTERCEPT_VER(pthread_cond_signal, "GLIBC_2.3.2");
-  TSAN_INTERCEPT_VER(pthread_cond_broadcast, "GLIBC_2.3.2");
-  TSAN_INTERCEPT_VER(pthread_cond_wait, "GLIBC_2.3.2");
-  TSAN_INTERCEPT_VER(pthread_cond_timedwait, "GLIBC_2.3.2");
-  TSAN_INTERCEPT_VER(pthread_cond_destroy, "GLIBC_2.3.2");
+  TSAN_INTERCEPT_VER(pthread_cond_init, PTHREAD_ABI_BASE);
+  TSAN_INTERCEPT_VER(pthread_cond_signal, PTHREAD_ABI_BASE);
+  TSAN_INTERCEPT_VER(pthread_cond_broadcast, PTHREAD_ABI_BASE);
+  TSAN_INTERCEPT_VER(pthread_cond_wait, PTHREAD_ABI_BASE);
+  TSAN_INTERCEPT_VER(pthread_cond_timedwait, PTHREAD_ABI_BASE);
+  TSAN_INTERCEPT_VER(pthread_cond_destroy, PTHREAD_ABI_BASE);
 
   TSAN_INTERCEPT(pthread_mutex_init);
   TSAN_INTERCEPT(pthread_mutex_destroy);

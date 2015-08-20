@@ -301,6 +301,20 @@ static void ProtectGap(uptr addr, uptr size) {
   void *res = MmapNoAccess(addr, size, "shadow gap");
   if (addr == (uptr)res)
     return;
+  // A few pages at the start of the address space can not be protected.
+  // But we really want to protect as much as possible, to prevent this memory
+  // being returned as a result of a non-FIXED mmap().
+  if (addr == kZeroBaseShadowStart) {
+    uptr step = GetPageSizeCached();
+    while (size > step && addr < kZeroBaseMaxShadowStart) {
+      addr += step;
+      size -= step;
+      void *res = MmapNoAccess(addr, size, "shadow gap");
+      if (addr == (uptr)res)
+        return;
+    }
+  }
+
   Report("ERROR: Failed to protect the shadow gap. "
          "ASan cannot proceed correctly. ABORTING.\n");
   DumpProcessMap();
@@ -363,11 +377,11 @@ static void AsanInitInternal() {
   CHECK(!asan_init_is_running && "ASan init calls itself!");
   asan_init_is_running = true;
 
+  CacheBinaryName();
+
   // Initialize flags. This must be done early, because most of the
   // initialization steps look at flags().
   InitializeFlags();
-
-  CacheBinaryName();
 
   AsanCheckIncompatibleRT();
   AsanCheckDynamicRTPrereqs();
@@ -457,7 +471,7 @@ static void AsanInitInternal() {
   }
 
   AsanTSDInit(PlatformTSDDtor);
-  InstallDeadlySignalHandlers(AsanOnSIGSEGV);
+  InstallDeadlySignalHandlers(AsanOnDeadlySignal);
 
   AllocatorOptions allocator_options;
   allocator_options.SetFrom(flags(), common_flags());
@@ -545,10 +559,18 @@ int NOINLINE __asan_set_error_exit_code(int exit_code) {
 void NOINLINE __asan_handle_no_return() {
   int local_stack;
   AsanThread *curr_thread = GetCurrentThread();
-  CHECK(curr_thread);
   uptr PageSize = GetPageSizeCached();
-  uptr top = curr_thread->stack_top();
-  uptr bottom = ((uptr)&local_stack - PageSize) & ~(PageSize-1);
+  uptr top, bottom;
+  if (curr_thread) {
+    top = curr_thread->stack_top();
+    bottom = ((uptr)&local_stack - PageSize) & ~(PageSize - 1);
+  } else {
+    // If we haven't seen this thread, try asking the OS for stack bounds.
+    uptr tls_addr, tls_size, stack_size;
+    GetThreadStackAndTls(/*main=*/false, &bottom, &stack_size, &tls_addr,
+                         &tls_size);
+    top = bottom + stack_size;
+  }
   static const uptr kMaxExpectedCleanupSize = 64 << 20;  // 64M
   if (top - bottom > kMaxExpectedCleanupSize) {
     static bool reported_warning = false;
@@ -564,7 +586,7 @@ void NOINLINE __asan_handle_no_return() {
     return;
   }
   PoisonShadow(bottom, top - bottom, 0);
-  if (curr_thread->has_fake_stack())
+  if (curr_thread && curr_thread->has_fake_stack())
     curr_thread->fake_stack()->HandleNoReturn();
 }
 
@@ -577,4 +599,8 @@ void NOINLINE __asan_set_death_callback(void (*callback)(void)) {
 void __asan_init() {
   AsanActivate();
   AsanInitInternal();
+}
+
+void __asan_version_mismatch_check() {
+  // Do nothing.
 }
