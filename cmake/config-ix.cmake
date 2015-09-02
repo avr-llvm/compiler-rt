@@ -244,7 +244,14 @@ function(get_target_flags_for_arch arch out_var)
   if(ARCH_INDEX EQUAL -1)
     message(FATAL_ERROR "Unsupported architecture: ${arch}")
   else()
-    set(${out_var} ${TARGET_${arch}_CFLAGS} PARENT_SCOPE)
+    if (NOT APPLE)
+      set(${out_var} ${TARGET_${arch}_CFLAGS} PARENT_SCOPE)
+    else()
+      # This is only called in constructing cflags for tests executing on the
+      # host. This will need to all be cleaned up to support building tests
+      # for cross-targeted hardware (i.e. iOS).
+      set(${out_var} -arch ${arch} PARENT_SCOPE)
+    endif()
   endif()
 endfunction()
 
@@ -257,6 +264,7 @@ if(APPLE)
   set(X86_64 x86_64 x86_64h)
 endif()
 
+set(ALL_BUILTIN_SUPPORTED_ARCH i386 i686 ${X86_64} ${ARM32} ${ARM64})
 set(ALL_SANITIZER_COMMON_SUPPORTED_ARCH ${X86_64} i386 i686 powerpc64
   powerpc64le ${ARM32} ${ARM64} mips mips64 mipsel mips64el)
 set(ALL_ASAN_SUPPORTED_ARCH ${X86_64} i386 i686 powerpc64 powerpc64le ${ARM32}
@@ -266,7 +274,7 @@ set(ALL_LSAN_SUPPORTED_ARCH ${X86_64} mips64 mips64el)
 set(ALL_MSAN_SUPPORTED_ARCH ${X86_64} mips64 mips64el)
 set(ALL_PROFILE_SUPPORTED_ARCH ${X86_64} i386 i686 ${ARM32} mips mips64
     mipsel mips64el ${ARM64} avr powerpc64 powerpc64le)
-set(ALL_TSAN_SUPPORTED_ARCH ${X86_64} mips64 mips64el)
+set(ALL_TSAN_SUPPORTED_ARCH ${X86_64} mips64 mips64el ${ARM64})
 set(ALL_UBSAN_SUPPORTED_ARCH ${X86_64} i386 i686 ${ARM32} ${ARM64} mips
     mipsel mips64 mips64el powerpc64 powerpc64le)
 set(ALL_SAFESTACK_SUPPORTED_ARCH ${X86_64} i386 i686)
@@ -283,6 +291,7 @@ if(APPLE)
   # Note: In order to target x86_64h on OS X the minimum deployment target must
   # be 10.8 or higher.
   set(SANITIZER_COMMON_SUPPORTED_OS osx)
+  set(BUILTIN_SUPPORTED_OS osx)
   if(NOT SANITIZER_MIN_OSX_VERSION)
     string(REGEX MATCH "-mmacosx-version-min=([.0-9]+)"
            MACOSX_VERSION_MIN_FLAG "${CMAKE_CXX_FLAGS}")
@@ -344,6 +353,7 @@ if(APPLE)
         -isysroot ${IOSSIM_SDK_DIR})
 
       list(APPEND SANITIZER_COMMON_SUPPORTED_OS iossim)
+      list(APPEND BUILTIN_SUPPORTED_OS iossim)
       darwin_test_archs(iossim
         DARWIN_iossim_ARCHS
         ${toolchain_arches})
@@ -365,6 +375,7 @@ if(APPLE)
         -isysroot ${IOS_SDK_DIR})
 
       list(APPEND SANITIZER_COMMON_SUPPORTED_OS ios)
+      list(APPEND BUILTIN_SUPPORTED_OS ios)
       darwin_test_archs(ios
         DARWIN_ios_ARCHS
         ${toolchain_arches})
@@ -378,6 +389,8 @@ if(APPLE)
 
   # for list_union
   include(CompilerRTUtils)
+
+  list_union(BUILTIN_SUPPORTED_ARCH ALL_BUILTIN_SUPPORTED_ARCH toolchain_arches)
 
   list_union(SANITIZER_COMMON_SUPPORTED_ARCH
     ALL_SANITIZER_COMMON_SUPPORTED_ARCH
@@ -412,6 +425,8 @@ if(APPLE)
     SANITIZER_COMMON_SUPPORTED_ARCH)
 else()
   # Architectures supported by compiler-rt libraries.
+  filter_available_targets(BUILTIN_SUPPORTED_ARCH
+    ${ALL_BUILTIN_SUPPORTED_ARCH})
   filter_available_targets(SANITIZER_COMMON_SUPPORTED_ARCH
     ${ALL_SANITIZER_COMMON_SUPPORTED_ARCH})
   # LSan and UBSan common files should be available on all architectures

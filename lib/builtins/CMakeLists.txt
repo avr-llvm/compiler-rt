@@ -139,6 +139,12 @@ set(GENERIC_SOURCES
   umodsi3.c
   umodti3.c)
 
+if(NOT WIN32)
+  set(GENERIC_SOURCES
+      ${GENERIC_SOURCES}
+      emutls.c)
+endif()
+
 if (HAVE_UNWIND_H)
   set(GENERIC_SOURCES
       ${GENERIC_SOURCES}
@@ -153,6 +159,7 @@ set(x86_64_SOURCES
   x86_64/floatundisf.S
   x86_64/floatundixf.S
   ${GENERIC_SOURCES})
+set(x86_64h_SOURCES ${x86_64_SOURCES})
 
 if(WIN32)
   set(x86_64_SOURCES
@@ -189,6 +196,10 @@ set(i686_SOURCES
 set(arm_SOURCES
   arm/adddf3vfp.S
   arm/addsf3vfp.S
+  arm/aeabi_cdcmp.S
+  arm/aeabi_cdcmpeq_check_nan.c
+  arm/aeabi_cfcmp.S
+  arm/aeabi_cfcmpeq_check_nan.c
   arm/aeabi_dcmp.S
   arm/aeabi_div0.c
   arm/aeabi_drsub.c
@@ -291,10 +302,54 @@ set(aarch64_SOURCES
   trunctfsf2.c
   ${GENERIC_SOURCES})
 
+set(armv7_SOURCES ${arm_SOURCES})
+set(armv7s_SOURCES ${arm_SOURCES})
+set(arm64_SOURCES ${aarch64_SOURCES})
+
 add_custom_target(builtins)
 
-if (NOT WIN32 OR MINGW)
-  foreach (arch x86_64 i386 i686 arm aarch64 avr)
+if (APPLE)
+  foreach (os ${BUILTIN_SUPPORTED_OS})
+    list_union(DARWIN_BUILTIN_ARCHS DARWIN_${os}_ARCHS BUILTIN_SUPPORTED_ARCH)
+    set(${os}_builtin_libs)
+    set(${os}_builtin_lipo_flags)
+    foreach (arch ${DARWIN_BUILTIN_ARCHS})
+      # Filter out generic versions of routines that are re-implemented in
+      # architecture specific manner.  This prevents multiple definitions of the
+      # same symbols, making the symbol selection non-deterministic.
+      foreach (_file ${${arch}_SOURCES})
+        if (${_file} MATCHES ${arch}/*)
+          get_filename_component(_name ${_file} NAME)
+          string(REPLACE ".S" ".c" _cname "${_name}")
+          list(REMOVE_ITEM ${arch}_SOURCES ${_cname})
+        endif ()
+      endforeach ()
+
+      add_compiler_rt_runtime(clang_rt.builtins_${arch} STATIC
+                              OS ${os}
+                              ARCHS ${arch}
+                              SOURCES ${${arch}_SOURCES}
+                              CFLAGS "-std=c99" ${DARWIN_${os}_CFLAGS} -arch ${arch}
+                              PARENT_TARGET builtins)
+      list(APPEND ${os}_builtin_libs clang_rt.builtins_${arch}_${os})
+      list(APPEND ${os}_builtin_lipo_flags -arch ${arch} 
+        ${COMPILER_RT_LIBRARY_OUTPUT_DIR}/libclang_rt.builtins_${arch}_${os}.a)
+    endforeach()
+
+    if(${os}_builtin_libs)
+      add_custom_command(OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/libclang_rt.builtins_${os}.a
+        COMMAND lipo -output
+                ${COMPILER_RT_LIBRARY_OUTPUT_DIR}/libclang_rt.builtins_${os}.a
+                -create ${${os}_builtin_lipo_flags}
+        DEPENDS ${${os}_builtin_libs}
+        )
+      add_custom_target(clang_rt.builtins_${os}
+        DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/libclang_rt.builtins_${os}.a)
+      add_dependencies(builtins clang_rt.builtins_${os})
+    endif()
+  endforeach()
+elseif (NOT WIN32 OR MINGW)
+  foreach (arch ${BUILTIN_SUPPORTED_ARCH})
     if (CAN_TARGET_${arch})
       # Filter out generic versions of routines that are re-implemented in
       # architecture specific manner.  This prevents multiple definitions of the
@@ -307,10 +362,12 @@ if (NOT WIN32 OR MINGW)
         endif ()
       endforeach ()
 
-      add_compiler_rt_runtime(clang_rt.builtins-${arch} ${arch} STATIC
+      add_compiler_rt_runtime(clang_rt.builtins
+                              STATIC
+                              ARCHS ${arch}
                               SOURCES ${${arch}_SOURCES}
-                              CFLAGS "-std=c99")
-      add_dependencies(builtins clang_rt.builtins-${arch})
+                              CFLAGS "-std=c99"
+                              PARENT_TARGET builtins)
     endif ()
   endforeach ()
 endif ()

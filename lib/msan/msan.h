@@ -167,7 +167,6 @@ struct SymbolizerScope {
   ~SymbolizerScope() { ExitSymbolizer(); }
 };
 
-void MsanDie();
 void PrintWarning(uptr pc, uptr bp);
 void PrintWarningWithOrigin(uptr pc, uptr bp, u32 origin);
 
@@ -223,8 +222,6 @@ class ScopedThreadLocalStateBackup {
  private:
   u64 va_arg_overflow_size_tls;
 };
-
-extern void (*death_callback)(void);
 
 void MsanTSDInit(void (*destructor)(void *tsd));
 void *MsanTSDGet();

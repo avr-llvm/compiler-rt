@@ -90,8 +90,6 @@ bool msan_init_is_running;
 
 int msan_report_count = 0;
 
-void (*death_callback)(void);
-
 // Array of stack origins.
 // FIXME: make it resizable.
 static const uptr kNumStackOriginDescrs = 1024 * 1024;
@@ -145,6 +143,7 @@ static void InitializeFlags() {
     // FIXME: test and enable.
     cf.check_printf = false;
     cf.intercept_tls_get_addr = true;
+    cf.exitcode = 77;
     OverrideCommonFlags(cf);
   }
 
@@ -185,11 +184,18 @@ static void InitializeFlags() {
 
   if (common_flags()->help) parser.PrintFlagDescriptions();
 
-  // Check flag values:
-  if (f->exit_code < 0 || f->exit_code > 127) {
-    Printf("Exit code not in [0, 128) range: %d\n", f->exit_code);
-    Die();
+  // Check if deprecated exit_code MSan flag is set.
+  if (f->exit_code != -1) {
+    if (Verbosity())
+      Printf("MSAN_OPTIONS=exit_code is deprecated! "
+             "Please use MSAN_OPTIONS=exitcode instead.\n");
+    CommonFlags cf;
+    cf.CopyFrom(*common_flags());
+    cf.exitcode = f->exit_code;
+    OverrideCommonFlags(cf);
   }
+
+  // Check flag values:
   if (f->origin_history_size < 0 ||
       f->origin_history_size > Origin::kMaxDepth) {
     Printf(
@@ -369,7 +375,6 @@ void __msan_init() {
   msan_init_is_running = 1;
   SanitizerToolName = "MemorySanitizer";
 
-  SetDieCallback(MsanDie);
   InitTlsSize();
 
   CacheBinaryName();
@@ -419,10 +424,6 @@ void __msan_init() {
 
   msan_init_is_running = 0;
   msan_inited = 1;
-}
-
-void __msan_set_exit_code(int exit_code) {
-  flags()->exit_code = exit_code;
 }
 
 void __msan_set_keep_going(int keep_going) {
@@ -619,7 +620,7 @@ void __sanitizer_unaligned_store64(uu64 *p, u64 x) {
 }
 
 void __msan_set_death_callback(void (*callback)(void)) {
-  death_callback = callback;
+  SetUserDieCallback(callback);
 }
 
 #if !SANITIZER_SUPPORTS_WEAK_HOOKS

@@ -151,20 +151,13 @@ bool InitShadow(bool init_origins) {
   return true;
 }
 
-void MsanDie() {
-  if (common_flags()->coverage)
-    __sanitizer_cov_dump();
-  if (death_callback)
-    death_callback();
-  internal__exit(flags()->exit_code);
-}
-
 static void MsanAtExit(void) {
   if (flags()->print_stats && (flags()->atexit || msan_report_count > 0))
     ReportStats();
   if (msan_report_count > 0) {
     ReportAtExitStatistics();
-    if (flags()->exit_code) _exit(flags()->exit_code);
+    if (common_flags()->exitcode)
+      internal__exit(common_flags()->exitcode);
   }
 }
 

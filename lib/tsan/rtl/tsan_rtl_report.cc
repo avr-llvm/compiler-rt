@@ -485,6 +485,8 @@ static void AddRacyStacks(ThreadState *thr, VarSizeStackTrace traces[2],
 }
 
 bool OutputReport(ThreadState *thr, const ScopedReport &srep) {
+  if (!flags()->report_bugs)
+    return false;
   atomic_store(&ctx->last_symbolize_time_ns, NanoTime(), memory_order_relaxed);
   const ReportDesc *rep = srep.GetReport();
   Suppression *supp = 0;
@@ -512,7 +514,7 @@ bool OutputReport(ThreadState *thr, const ScopedReport &srep) {
   PrintReport(rep);
   ctx->nreported++;
   if (flags()->halt_on_error)
-    internal__exit(flags()->exitcode);
+    Die();
   return true;
 }
 

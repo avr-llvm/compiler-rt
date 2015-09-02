@@ -105,24 +105,47 @@ uptr stoptheworld_tracer_pid = 0;
 // writing to the same log file.
 uptr stoptheworld_tracer_ppid = 0;
 
-static DieCallbackType InternalDieCallback, UserDieCallback;
-void SetDieCallback(DieCallbackType callback) {
-  InternalDieCallback = callback;
-}
-void SetUserDieCallback(DieCallbackType callback) {
-  UserDieCallback = callback;
+static const int kMaxNumOfInternalDieCallbacks = 5;
+static DieCallbackType InternalDieCallbacks[kMaxNumOfInternalDieCallbacks];
+
+bool AddDieCallback(DieCallbackType callback) {
+  for (int i = 0; i < kMaxNumOfInternalDieCallbacks; i++) {
+    if (InternalDieCallbacks[i] == nullptr) {
+      InternalDieCallbacks[i] = callback;
+      return true;
+    }
+  }
+  return false;
 }
 
-DieCallbackType GetDieCallback() {
-  return InternalDieCallback;
+bool RemoveDieCallback(DieCallbackType callback) {
+  for (int i = 0; i < kMaxNumOfInternalDieCallbacks; i++) {
+    if (InternalDieCallbacks[i] == callback) {
+      internal_memmove(&InternalDieCallbacks[i], &InternalDieCallbacks[i + 1],
+                       sizeof(InternalDieCallbacks[0]) *
+                           (kMaxNumOfInternalDieCallbacks - i - 1));
+      InternalDieCallbacks[kMaxNumOfInternalDieCallbacks - 1] = nullptr;
+      return true;
+    }
+  }
+  return false;
+}
+
+static DieCallbackType UserDieCallback;
+void SetUserDieCallback(DieCallbackType callback) {
+  UserDieCallback = callback;
 }
 
 void NORETURN Die() {
   if (UserDieCallback)
     UserDieCallback();
-  if (InternalDieCallback)
-    InternalDieCallback();
-  internal__exit(1);
+  for (int i = kMaxNumOfInternalDieCallbacks - 1; i >= 0; i--) {
+    if (InternalDieCallbacks[i])
+      InternalDieCallbacks[i]();
+  }
+  if (common_flags()->abort_on_error)
+    Abort();
+  internal__exit(common_flags()->exitcode);
 }
 
 static CheckFailedCallbackType CheckFailedCallback;

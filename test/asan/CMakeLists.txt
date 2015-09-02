@@ -24,7 +24,12 @@ if(NOT COMPILER_RT_STANDALONE_BUILD)
 endif()
 set(ASAN_DYNAMIC_TEST_DEPS ${ASAN_TEST_DEPS})
 
-foreach(arch ${ASAN_SUPPORTED_ARCH})
+set(ASAN_TEST_ARCH ${ASAN_SUPPORTED_ARCH})
+if(APPLE)
+  darwin_filter_host_archs(ASAN_SUPPORTED_ARCH ASAN_TEST_ARCH)
+endif()
+
+foreach(arch ${ASAN_TEST_ARCH})
   if(ANDROID)
     set(ASAN_TEST_TARGET_ARCH ${arch}-android)
   else()
