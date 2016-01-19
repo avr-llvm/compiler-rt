@@ -11,6 +11,7 @@
 //
 // ASan-private header for asan_thread.cc.
 //===----------------------------------------------------------------------===//
+
 #ifndef ASAN_THREAD_H
 #define ASAN_THREAD_H
 
@@ -21,6 +22,10 @@
 #include "sanitizer_common/sanitizer_common.h"
 #include "sanitizer_common/sanitizer_libc.h"
 #include "sanitizer_common/sanitizer_thread_registry.h"
+
+namespace __sanitizer {
+struct DTLS;
+}  // namespace __sanitizer
 
 namespace __asan {
 
@@ -36,7 +41,7 @@ class AsanThreadContext : public ThreadContextBase {
   explicit AsanThreadContext(int tid)
       : ThreadContextBase(tid), announced(false),
         destructor_iterations(GetPthreadDestructorIterations()), stack_id(0),
-        thread(0) {}
+        thread(nullptr) {}
   bool announced;
   u8 destructor_iterations;
   u32 stack_id;
@@ -66,6 +71,7 @@ class AsanThread {
   uptr stack_size() { return stack_size_; }
   uptr tls_begin() { return tls_begin_; }
   uptr tls_end() { return tls_end_; }
+  DTLS *dtls() { return dtls_; }
   u32 tid() { return context_->tid; }
   AsanThreadContext *context() { return context_; }
   void set_context(AsanThreadContext *context) { context_ = context; }
@@ -84,8 +90,8 @@ class AsanThread {
   void DeleteFakeStack(int tid) {
     if (!fake_stack_) return;
     FakeStack *t = fake_stack_;
-    fake_stack_ = 0;
-    SetTLSFakeStack(0);
+    fake_stack_ = nullptr;
+    SetTLSFakeStack(nullptr);
     t->Destroy(tid);
   }
 
@@ -95,7 +101,7 @@ class AsanThread {
 
   FakeStack *fake_stack() {
     if (!__asan_option_detect_stack_use_after_return)
-      return 0;
+      return nullptr;
     if (!has_fake_stack())
       return AsyncSignalSafeLazyInitFakeStack();
     return fake_stack_;
@@ -131,6 +137,7 @@ class AsanThread {
   uptr stack_size_;
   uptr tls_begin_;
   uptr tls_end_;
+  DTLS *dtls_;
 
   FakeStack *fake_stack_;
   AsanThreadLocalMallocStorage malloc_storage_;
@@ -179,6 +186,6 @@ AsanThread *FindThreadByStackAddress(uptr addr);
 
 // Used to handle fork().
 void EnsureMainThreadIDIsCorrect();
-}  // namespace __asan
+} // namespace __asan
 
-#endif  // ASAN_THREAD_H
+#endif // ASAN_THREAD_H

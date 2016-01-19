@@ -49,6 +49,8 @@ static const uptr kMaxNumberOfModules = 1 << 14;
 
 const uptr kMaxThreadStackSize = 1 << 30;  // 1Gb
 
+static const uptr kErrorMessageBufferSize = 1 << 16;
+
 // Denotes fake PC values that come from JIT/JAVA/etc.
 // For such PC values __tsan_symbolize_external() will be called.
 const u64 kExternalPCBit = 1ULL << 60;
@@ -76,7 +78,10 @@ void GetThreadStackAndTls(bool main, uptr *stk_addr, uptr *stk_size,
                           uptr *tls_addr, uptr *tls_size);
 
 // Memory management
-void *MmapOrDie(uptr size, const char *mem_type);
+void *MmapOrDie(uptr size, const char *mem_type, bool raw_report = false);
+INLINE void *MmapOrDieQuietly(uptr size, const char *mem_type) {
+  return MmapOrDie(size, mem_type, /*raw_report*/ true);
+}
 void UnmapOrDie(void *addr, uptr size);
 void *MmapFixedNoReserve(uptr fixed_addr, uptr size,
                          const char *name = nullptr);
@@ -97,6 +102,8 @@ void DecreaseTotalMmap(uptr size);
 uptr GetRSS();
 void NoHugePagesInRegion(uptr addr, uptr length);
 void DontDumpShadowMemory(uptr addr, uptr length);
+// Check if the built VMA size matches the runtime one.
+void CheckVMASize();
 
 // InternalScopedBuffer can be used instead of large stack arrays to
 // keep frame size low.
@@ -160,6 +167,7 @@ void SetLowLevelAllocateCallback(LowLevelAllocateCallback callback);
 // IO
 void RawWrite(const char *buffer);
 bool ColorizeReports();
+void RemoveANSIEscapeSequencesFromString(char *buffer);
 void Printf(const char *format, ...);
 void Report(const char *format, ...);
 void SetPrintfAndReportCallback(void (*callback)(const char *));
@@ -274,6 +282,8 @@ bool IsAbsolutePath(const char *path);
 
 u32 GetUid();
 void ReExec();
+char **GetArgv();
+void PrintCmdline();
 bool StackSizeIsUnlimited();
 void SetStackSizeLimitInBytes(uptr limit);
 bool AddressSpaceIsUnlimited();
@@ -307,7 +317,8 @@ void NORETURN Die();
 void NORETURN
 CheckFailed(const char *file, int line, const char *cond, u64 v1, u64 v2);
 void NORETURN ReportMmapFailureAndDie(uptr size, const char *mem_type,
-                                      error_t err);
+                                      const char *mmap_type, error_t err,
+                                      bool raw_report = false);
 
 // Set the name of the current thread to 'name', return true on succees.
 // The name may be truncated to a system-dependent limit.
@@ -420,7 +431,7 @@ INLINE uptr RoundUpToPowerOfTwo(uptr size) {
 }
 
 INLINE uptr RoundUpTo(uptr size, uptr boundary) {
-  CHECK(IsPowerOfTwo(boundary));
+  RAW_CHECK(IsPowerOfTwo(boundary));
   return (size + boundary - 1) & ~(boundary - 1);
 }
 
@@ -512,6 +523,19 @@ class InternalMmapVectorNoCtor {
 
   void clear() { size_ = 0; }
   bool empty() const { return size() == 0; }
+
+  const T *begin() const {
+    return data();
+  }
+  T *begin() {
+    return data();
+  }
+  const T *end() const {
+    return data() + size();
+  }
+  T *end() {
+    return data() + size();
+  }
 
  private:
   void Resize(uptr new_capacity) {
@@ -619,8 +643,7 @@ class LoadedModule {
         : next(nullptr), beg(beg), end(end), executable(executable) {}
   };
 
-  typedef IntrusiveList<AddressRange>::ConstIterator Iterator;
-  Iterator ranges() const { return Iterator(&ranges_); }
+  const IntrusiveList<AddressRange> &ranges() const { return ranges_; }
 
  private:
   char *full_name_;  // Owned.
@@ -646,22 +669,34 @@ enum AndroidApiLevel {
   ANDROID_POST_LOLLIPOP = 23
 };
 
+void WriteToSyslog(const char *buffer);
+
+#if SANITIZER_MAC
+void LogFullErrorReport(const char *buffer);
+#else
+INLINE void LogFullErrorReport(const char *buffer) {}
+#endif
+
+#if SANITIZER_LINUX || SANITIZER_MAC
+void WriteOneLineToSyslog(const char *s);
+void LogMessageOnPrintf(const char *str);
+#else
+INLINE void WriteOneLineToSyslog(const char *s) {}
+INLINE void LogMessageOnPrintf(const char *str) {}
+#endif
+
 #if SANITIZER_LINUX
 // Initialize Android logging. Any writes before this are silently lost.
 void AndroidLogInit();
-void WriteToSyslog(const char *buffer);
 #else
 INLINE void AndroidLogInit() {}
-INLINE void WriteToSyslog(const char *buffer) {}
 #endif
 
 #if SANITIZER_ANDROID
-void GetExtraActivationFlags(char *buf, uptr size);
 void SanitizerInitializeUnwinder();
 AndroidApiLevel AndroidGetApiLevel();
 #else
 INLINE void AndroidLogWrite(const char *buffer_unused) {}
-INLINE void GetExtraActivationFlags(char *buf, uptr size) { *buf = '\0'; }
 INLINE void SanitizerInitializeUnwinder() {}
 INLINE AndroidApiLevel AndroidGetApiLevel() { return ANDROID_NOT_ANDROID; }
 #endif
@@ -709,6 +744,9 @@ struct SignalContext {
 };
 
 void GetPcSpBp(void *context, uptr *pc, uptr *sp, uptr *bp);
+
+void DisableReexec();
+void MaybeReexec();
 
 }  // namespace __sanitizer
 

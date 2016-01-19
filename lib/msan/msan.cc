@@ -55,7 +55,7 @@ SANITIZER_INTERFACE_ATTRIBUTE
 THREADLOCAL u32 __msan_retval_origin_tls;
 
 SANITIZER_INTERFACE_ATTRIBUTE
-THREADLOCAL u64 __msan_va_arg_tls[kMsanParamTlsSize / sizeof(u64)];
+ALIGNED(16) THREADLOCAL u64 __msan_va_arg_tls[kMsanParamTlsSize / sizeof(u64)];
 
 SANITIZER_INTERFACE_ATTRIBUTE
 THREADLOCAL u64 __msan_va_arg_overflow_size_tls;
@@ -223,9 +223,9 @@ void GetStackTrace(BufferedStackTrace *stack, uptr max_s, uptr pc, uptr bp,
   if (!t || !StackTrace::WillUseFastUnwind(request_fast_unwind)) {
     // Block reports from our interceptors during _Unwind_Backtrace.
     SymbolizerScope sym_scope;
-    return stack->Unwind(max_s, pc, bp, 0, 0, 0, request_fast_unwind);
+    return stack->Unwind(max_s, pc, bp, nullptr, 0, 0, request_fast_unwind);
   }
-  stack->Unwind(max_s, pc, bp, 0, t->stack_top(), t->stack_bottom(),
+  stack->Unwind(max_s, pc, bp, nullptr, t->stack_top(), t->stack_bottom(),
                 request_fast_unwind);
 }
 
@@ -305,7 +305,7 @@ u32 ChainOrigin(u32 id, StackTrace *stack) {
   return chained.raw_id();
 }
 
-}  // namespace __msan
+} // namespace __msan
 
 // Interface.
 
@@ -379,6 +379,7 @@ void __msan_init() {
 
   CacheBinaryName();
   InitializeFlags();
+
   __sanitizer_set_report_path(common_flags()->log_path);
 
   InitializeInterceptors();
@@ -412,7 +413,9 @@ void __msan_init() {
 
   MsanTSDInit(MsanTSDDtor);
 
-  MsanThread *main_thread = MsanThread::Create(0, 0);
+  MsanAllocatorInit();
+
+  MsanThread *main_thread = MsanThread::Create(nullptr, nullptr);
   SetCurrentThread(main_thread);
   main_thread->ThreadStart();
 
@@ -636,4 +639,4 @@ void __sanitizer_print_stack_trace() {
   GET_FATAL_STACK_TRACE_PC_BP(StackTrace::GetCurrentPc(), GET_CURRENT_FRAME());
   stack.Print();
 }
-}  // extern "C"
+} // extern "C"

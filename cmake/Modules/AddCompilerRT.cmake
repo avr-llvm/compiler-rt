@@ -155,13 +155,20 @@ function(add_compiler_rt_runtime name type)
       set_target_properties(${libname} PROPERTIES
       OSX_ARCHITECTURES "${LIB_ARCHS_${libname}}")
     endif()
+
+    if(type STREQUAL "SHARED")
+      rt_externalize_debuginfo(${libname})
+    endif()
   endforeach()
   if(LIB_PARENT_TARGET)
     add_dependencies(${LIB_PARENT_TARGET} ${libnames})
   endif()
 endfunction()
 
-set(COMPILER_RT_TEST_CFLAGS)
+# when cross compiling, COMPILER_RT_TEST_COMPILER_CFLAGS help
+# in compilation and linking of unittests.
+string(REPLACE " " ";" COMPILER_RT_UNITTEST_CFLAGS "${COMPILER_RT_TEST_COMPILER_CFLAGS}")
+set(COMPILER_RT_UNITTEST_LINKFLAGS ${COMPILER_RT_UNITTEST_CFLAGS})
 
 # Unittests support.
 set(COMPILER_RT_GTEST_PATH ${LLVM_MAIN_SRC_DIR}/utils/unittest/googletest)
@@ -173,14 +180,14 @@ set(COMPILER_RT_GTEST_CFLAGS
   -I${COMPILER_RT_GTEST_PATH}
 )
 
-append_list_if(COMPILER_RT_DEBUG -DSANITIZER_DEBUG=1 COMPILER_RT_TEST_CFLAGS)
+append_list_if(COMPILER_RT_DEBUG -DSANITIZER_DEBUG=1 COMPILER_RT_UNITTEST_CFLAGS)
 
 if(MSVC)
   # clang doesn't support exceptions on Windows yet.
-  list(APPEND COMPILER_RT_TEST_CFLAGS -D_HAS_EXCEPTIONS=0)
+  list(APPEND COMPILER_RT_UNITTEST_CFLAGS -D_HAS_EXCEPTIONS=0)
 
   # We should teach clang to understand "#pragma intrinsic", see PR19898.
-  list(APPEND COMPILER_RT_TEST_CFLAGS -Wno-undefined-inline)
+  list(APPEND COMPILER_RT_UNITTEST_CFLAGS -Wno-undefined-inline)
 
   # Clang doesn't support SEH on Windows yet.
   list(APPEND COMPILER_RT_GTEST_CFLAGS -DGTEST_HAS_SEH=0)
@@ -284,7 +291,8 @@ macro(add_custom_libcxx name prefix)
   ExternalProject_Add(${name}
     PREFIX ${prefix}
     SOURCE_DIR ${COMPILER_RT_LIBCXX_PATH}
-    CMAKE_ARGS -DCMAKE_C_COMPILER=${COMPILER_RT_TEST_COMPILER}
+    CMAKE_ARGS -DCMAKE_MAKE_PROGRAM:STRING=${CMAKE_MAKE_PROGRAM}
+               -DCMAKE_C_COMPILER=${COMPILER_RT_TEST_COMPILER}
                -DCMAKE_CXX_COMPILER=${COMPILER_RT_TEST_COMPILER}
                -DCMAKE_C_FLAGS=${LIBCXX_CFLAGS}
                -DCMAKE_CXX_FLAGS=${LIBCXX_CFLAGS}
@@ -309,3 +317,24 @@ macro(add_custom_libcxx name prefix)
     DEPENDS ${LIBCXX_DEPS}
     )
 endmacro()
+
+function(rt_externalize_debuginfo name)
+  if(NOT COMPILER_RT_EXTERNALIZE_DEBUGINFO)
+    return()
+  endif()
+
+  if(APPLE)
+    if(CMAKE_CXX_FLAGS MATCHES "-flto"
+      OR CMAKE_CXX_FLAGS_${uppercase_CMAKE_BUILD_TYPE} MATCHES "-flto")
+
+      set(lto_object ${CMAKE_CURRENT_BINARY_DIR}/${CMAKE_CFG_INTDIR}/${name}-lto.o)
+      set_property(TARGET ${name} APPEND_STRING PROPERTY
+        LINK_FLAGS " -Wl,-object_path_lto -Wl,${lto_object}")
+    endif()
+    add_custom_command(TARGET ${name} POST_BUILD
+      COMMAND xcrun dsymutil $<TARGET_FILE:${name}>
+      COMMAND xcrun strip -Sl $<TARGET_FILE:${name}>)
+  else()
+    message(FATAL_ERROR "COMPILER_RT_EXTERNALIZE_DEBUGINFO isn't implemented for non-darwin platforms!")
+  endif()
+endfunction()

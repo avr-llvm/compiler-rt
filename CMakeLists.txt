@@ -43,6 +43,11 @@ endif()
 # Top level target used to build all compiler-rt libraries.
 add_custom_target(compiler-rt ALL)
 
+option(COMPILER_RT_BUILD_BUILTINS "Build builtins" ON)
+mark_as_advanced(COMPILER_RT_BUILD_BUILTINS)
+option(COMPILER_RT_BUILD_SANITIZERS "Build sanitizers" ON)
+mark_as_advanced(COMPILER_RT_BUILD_SANITIZERS)
+
 if (NOT COMPILER_RT_STANDALONE_BUILD)
   # Compute the Clang version from the LLVM version.
   # FIXME: We should be able to reuse CLANG_VERSION variable calculated
@@ -132,22 +137,27 @@ else()
   set(COMPILER_RT_TEST_COMPILER_ID GNU)
 endif()
 
-# Tests using XFAIL use the first value in COMPILER_RT_TEST_TARGET_TRIPLE
-set(COMPILER_RT_TEST_TARGET_TRIPLE ${TARGET_TRIPLE} CACHE STRING
-    "Default triple for cross-compiled executables")
-string(REPLACE "-" ";" TARGET_TRIPLE_LIST ${COMPILER_RT_TEST_TARGET_TRIPLE})
-list(GET TARGET_TRIPLE_LIST 0 COMPILER_RT_TEST_TARGET_ARCH)
-list(GET TARGET_TRIPLE_LIST 1 COMPILER_RT_TEST_TARGET_OS)
-list(GET TARGET_TRIPLE_LIST 2 COMPILER_RT_TEST_TARGET_ABI)
-# Determine if test target triple is specified explicitly, and doesn't match the
-# default.
-if(NOT COMPILER_RT_TEST_TARGET_TRIPLE STREQUAL TARGET_TRIPLE)
-  set(COMPILER_RT_HAS_EXPLICIT_TEST_TARGET_TRIPLE TRUE)
-else()
-  set(COMPILER_RT_HAS_EXPLICIT_TEST_TARGET_TRIPLE FALSE)
+set(COMPILER_RT_DEFAULT_TARGET_TRIPLE ${TARGET_TRIPLE} CACHE STRING
+    "Default triple for which compiler-rt runtimes will be built.")
+if(DEFINED COMPILER_RT_TEST_TARGET_TRIPLE)
+  # Backwards compatibility: this variable used to be called
+  # COMPILER_RT_TEST_TARGET_TRIPLE.
+  set(COMPILER_RT_DEFAULT_TARGET_TRIPLE ${COMPILER_RT_TEST_TARGET_TRIPLE})
 endif()
 
-if ("${COMPILER_RT_TEST_TARGET_ABI}" STREQUAL "androideabi")
+string(REPLACE "-" ";" TARGET_TRIPLE_LIST ${COMPILER_RT_DEFAULT_TARGET_TRIPLE})
+list(GET TARGET_TRIPLE_LIST 0 COMPILER_RT_DEFAULT_TARGET_ARCH)
+list(GET TARGET_TRIPLE_LIST 1 COMPILER_RT_DEFAULT_TARGET_OS)
+list(GET TARGET_TRIPLE_LIST 2 COMPILER_RT_DEFAULT_TARGET_ABI)
+# Determine if test target triple is specified explicitly, and doesn't match the
+# default.
+if(NOT COMPILER_RT_DEFAULT_TARGET_TRIPLE STREQUAL TARGET_TRIPLE)
+  set(COMPILER_RT_HAS_EXPLICIT_DEFAULT_TARGET_TRIPLE TRUE)
+else()
+  set(COMPILER_RT_HAS_EXPLICIT_DEFAULT_TARGET_TRIPLE FALSE)
+endif()
+
+if ("${COMPILER_RT_DEFAULT_TARGET_ABI}" STREQUAL "androideabi")
   set(ANDROID 1)
 endif()
 
@@ -179,6 +189,8 @@ else()
 endif()
 
 option(COMPILER_RT_DEBUG "Build runtimes with full debug info" OFF)
+option(COMPILER_RT_EXTERNALIZE_DEBUGINFO
+  "Generate dSYM files and strip executables and libraries (Darwin Only)" OFF)
 # COMPILER_RT_DEBUG_PYBOOL is used by lit.common.configured.in.
 pythonize_bool(COMPILER_RT_DEBUG)
 
@@ -216,6 +228,7 @@ append_list_if(COMPILER_RT_HAS_FUNWIND_TABLES_FLAG -funwind-tables SANITIZER_COM
 append_list_if(COMPILER_RT_HAS_FNO_STACK_PROTECTOR_FLAG -fno-stack-protector SANITIZER_COMMON_CFLAGS)
 append_list_if(COMPILER_RT_HAS_FNO_SANITIZE_SAFE_STACK_FLAG -fno-sanitize=safe-stack SANITIZER_COMMON_CFLAGS)
 append_list_if(COMPILER_RT_HAS_FVISIBILITY_HIDDEN_FLAG -fvisibility=hidden SANITIZER_COMMON_CFLAGS)
+append_list_if(COMPILER_RT_HAS_FVISIBILITY_INLINES_HIDDEN_FLAG -fvisibility-inlines-hidden SANITIZER_COMMON_CFLAGS)
 append_list_if(COMPILER_RT_HAS_FNO_FUNCTION_SECTIONS_FLAG -fno-function-sections SANITIZER_COMMON_CFLAGS)
 append_list_if(COMPILER_RT_HAS_FNO_LTO_FLAG -fno-lto SANITIZER_COMMON_CFLAGS)
 
@@ -250,8 +263,7 @@ endif()
 # FIXME: Fix all sanitizers and add -Wframe-larger-than to
 # SANITIZER_COMMON_FLAGS
 if(COMPILER_RT_HAS_WFRAME_LARGER_THAN_FLAG AND NOT COMPILER_RT_DEBUG
-   AND NOT ${LLVM_NATIVE_ARCH} STREQUAL "PowerPC"
-   AND NOT ${LLVM_NATIVE_ARCH} STREQUAL "Mips")
+   AND NOT ${COMPILER_RT_DEFAULT_TARGET_ARCH} MATCHES "powerpc|mips")
   set(SANITIZER_LIMIT_FRAME_SIZE TRUE)
 else()
   set(SANITIZER_LIMIT_FRAME_SIZE FALSE)
@@ -307,5 +319,5 @@ add_subdirectory(lib)
 
 if(COMPILER_RT_INCLUDE_TESTS)
   add_subdirectory(unittests)
+  add_subdirectory(test)
 endif()
-add_subdirectory(test)

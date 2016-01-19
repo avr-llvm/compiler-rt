@@ -3,6 +3,9 @@
 // RUN: %clangxx_asan -fsanitize-coverage=func %s -o %t
 // RUN: %env_asan_opts=coverage=1 %run %t
 
+// https://github.com/google/sanitizers/issues/618
+// UNSUPPORTED: android
+
 #include <sanitizer/coverage_interface.h>
 #include <stdio.h>
 #include <assert.h>
@@ -39,6 +42,7 @@ int main() {
   assert(IS_POWER_OF_TWO(bar_bit));
 
   __sanitizer_reset_coverage();
+  assert(__sanitizer_get_total_unique_coverage() == 0);
   GET_AND_PRINT_COVERAGE();
   assert(bitset == 0);
 

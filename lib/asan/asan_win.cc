@@ -14,6 +14,7 @@
 
 #include "sanitizer_common/sanitizer_platform.h"
 #if SANITIZER_WINDOWS
+#define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 
 #include <stdlib.h>
@@ -174,14 +175,6 @@ void PlatformTSDDtor(void *tsd) {
 // }}}
 
 // ---------------------- Various stuff ---------------- {{{
-void DisableReexec() {
-  // No need to re-exec on Windows.
-}
-
-void MaybeReexec() {
-  // No need to re-exec on Windows.
-}
-
 void *AsanDoesNotSupportStaticLinkage() {
 #if defined(_DEBUG)
 #error Please build the runtime with a non-debug CRT: /MD or /MT

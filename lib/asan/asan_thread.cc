@@ -42,7 +42,7 @@ void AsanThreadContext::OnCreated(void *arg) {
 
 void AsanThreadContext::OnFinished() {
   // Drop the link to the AsanThread object.
-  thread = 0;
+  thread = nullptr;
 }
 
 // MIPS requires aligned address
@@ -125,7 +125,7 @@ void AsanThread::Destroy() {
 FakeStack *AsanThread::AsyncSignalSafeLazyInitFakeStack() {
   uptr stack_size = this->stack_size();
   if (stack_size == 0)  // stack_size is not yet available, don't use FakeStack.
-    return 0;
+    return nullptr;
   uptr old_val = 0;
   // fake_stack_ has 3 states:
   // 0   -- not initialized
@@ -146,11 +146,11 @@ FakeStack *AsanThread::AsyncSignalSafeLazyInitFakeStack() {
     SetTLSFakeStack(fake_stack_);
     return fake_stack_;
   }
-  return 0;
+  return nullptr;
 }
 
 void AsanThread::Init() {
-  fake_stack_ = 0;  // Will be initialized lazily if needed.
+  fake_stack_ = nullptr;  // Will be initialized lazily if needed.
   CHECK_EQ(this->stack_size(), 0U);
   SetThreadStackAndTls();
   CHECK_GT(this->stack_size(), 0U);
@@ -166,7 +166,7 @@ void AsanThread::Init() {
 thread_return_t AsanThread::ThreadStart(
     uptr os_id, atomic_uintptr_t *signal_thread_is_registered) {
   Init();
-  asanThreadRegistry().StartThread(tid(), os_id, 0);
+  asanThreadRegistry().StartThread(tid(), os_id, nullptr);
   if (signal_thread_is_registered)
     atomic_store(signal_thread_is_registered, 1, memory_order_release);
 
@@ -199,6 +199,7 @@ void AsanThread::SetThreadStackAndTls() {
                        &tls_size);
   stack_top_ = stack_bottom_ + stack_size_;
   tls_end_ = tls_begin_ + tls_size;
+  dtls_ = DTLS_Get();
 
   int local;
   CHECK(AddrIsInStack((uptr)&local));
@@ -276,7 +277,7 @@ AsanThread *GetCurrentThread() {
         return tctx->thread;
       }
     }
-    return 0;
+    return nullptr;
   }
   return context->thread;
 }
@@ -301,7 +302,7 @@ AsanThread *FindThreadByStackAddress(uptr addr) {
   AsanThreadContext *tctx = static_cast<AsanThreadContext *>(
       asanThreadRegistry().FindThreadContextLocked(ThreadStackContainsAddress,
                                                    (void *)addr));
-  return tctx ? tctx->thread : 0;
+  return tctx ? tctx->thread : nullptr;
 }
 
 void EnsureMainThreadIDIsCorrect() {
@@ -314,16 +315,16 @@ void EnsureMainThreadIDIsCorrect() {
 __asan::AsanThread *GetAsanThreadByOsIDLocked(uptr os_id) {
   __asan::AsanThreadContext *context = static_cast<__asan::AsanThreadContext *>(
       __asan::asanThreadRegistry().FindThreadContextByOsIDLocked(os_id));
-  if (!context) return 0;
+  if (!context) return nullptr;
   return context->thread;
 }
-}  // namespace __asan
+} // namespace __asan
 
 // --- Implementation of LSan-specific functions --- {{{1
 namespace __lsan {
 bool GetThreadRangesLocked(uptr os_id, uptr *stack_begin, uptr *stack_end,
-                           uptr *tls_begin, uptr *tls_end,
-                           uptr *cache_begin, uptr *cache_end) {
+                           uptr *tls_begin, uptr *tls_end, uptr *cache_begin,
+                           uptr *cache_end, DTLS **dtls) {
   __asan::AsanThread *t = __asan::GetAsanThreadByOsIDLocked(os_id);
   if (!t) return false;
   *stack_begin = t->stack_bottom();
@@ -333,6 +334,7 @@ bool GetThreadRangesLocked(uptr os_id, uptr *stack_begin, uptr *stack_end,
   // ASan doesn't keep allocator caches in TLS, so these are unused.
   *cache_begin = 0;
   *cache_end = 0;
+  *dtls = t->dtls();
   return true;
 }
 
@@ -354,4 +356,4 @@ void UnlockThreadRegistry() {
 void EnsureMainThreadIDIsCorrect() {
   __asan::EnsureMainThreadIDIsCorrect();
 }
-}  // namespace __lsan
+} // namespace __lsan

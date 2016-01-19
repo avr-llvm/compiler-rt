@@ -2,6 +2,9 @@
 # generic implementations of the core runtime library along with optimized
 # architecture-specific code in various subdirectories.
 
+# TODO: Need to add a mechanism for logging errors when builtin source files are
+# added to a sub-directory and not this CMakeLists file.
+
 set(GENERIC_SOURCES
   absvdi2.c
   absvsi2.c
@@ -38,6 +41,7 @@ set(GENERIC_SOURCES
   divsc3.c
   divsf3.c
   divsi3.c
+  divtc3.c
   divti3.c
   divtf3.c
   divxc3.c
@@ -139,7 +143,18 @@ set(GENERIC_SOURCES
   umodsi3.c
   umodti3.c)
 
-if(NOT WIN32)
+if(APPLE)
+  set(GENERIC_SOURCES
+    ${GENERIC_SOURCES}
+    atomic_flag_clear.c
+    atomic_flag_clear_explicit.c
+    atomic_flag_test_and_set.c
+    atomic_flag_test_and_set_explicit.c
+    atomic_signal_fence.c
+    atomic_thread_fence.c)
+endif()
+
+if(NOT WIN32 OR MINGW)
   set(GENERIC_SOURCES
       ${GENERIC_SOURCES}
       emutls.c)
@@ -151,47 +166,66 @@ if (HAVE_UNWIND_H)
       gcc_personality_v0.c)
 endif ()
 
-set(x86_64_SOURCES
-  x86_64/floatdidf.c
-  x86_64/floatdisf.c
-  x86_64/floatdixf.c
-  x86_64/floatundidf.S
-  x86_64/floatundisf.S
-  x86_64/floatundixf.S
-  ${GENERIC_SOURCES})
-set(x86_64h_SOURCES ${x86_64_SOURCES})
-
-if(WIN32)
+if (NOT MSVC)
   set(x86_64_SOURCES
-      ${x86_64_SOURCES}
-      x86_64/chkstk.S)
-endif()
+      x86_64/chkstk.S
+      x86_64/chkstk2.S
+      x86_64/floatdidf.c
+      x86_64/floatdisf.c
+      x86_64/floatdixf.c
+      x86_64/floatundidf.S
+      x86_64/floatundisf.S
+      x86_64/floatundixf.S
+      ${GENERIC_SOURCES})
+  set(x86_64h_SOURCES ${x86_64_SOURCES})
 
-set(i386_SOURCES
-  i386/ashldi3.S
-  i386/ashrdi3.S
-  i386/divdi3.S
-  i386/floatdidf.S
-  i386/floatdisf.S
-  i386/floatdixf.S
-  i386/floatundidf.S
-  i386/floatundisf.S
-  i386/floatundixf.S
-  i386/lshrdi3.S
-  i386/moddi3.S
-  i386/muldi3.S
-  i386/udivdi3.S
-  i386/umoddi3.S
-  ${GENERIC_SOURCES})
+  if (WIN32)
+    set(x86_64_SOURCES
+        ${x86_64_SOURCES}
+        x86_64/chkstk.S
+        x86_64/chkstk2.S)
+  endif()
 
-if(WIN32)
   set(i386_SOURCES
-      ${i386_SOURCES}
-      i386/chkstk.S)
-endif()
+      i386/ashldi3.S
+      i386/ashrdi3.S
+      i386/chkstk.S
+      i386/chkstk2.S
+      i386/divdi3.S
+      i386/floatdidf.S
+      i386/floatdisf.S
+      i386/floatdixf.S
+      i386/floatundidf.S
+      i386/floatundisf.S
+      i386/floatundixf.S
+      i386/lshrdi3.S
+      i386/moddi3.S
+      i386/muldi3.S
+      i386/udivdi3.S
+      i386/umoddi3.S
+      ${GENERIC_SOURCES})
 
-set(i686_SOURCES
-  ${i386_SOURCES})
+  if (WIN32)
+    set(i386_SOURCES
+        ${i386_SOURCES}
+        i386/chkstk.S
+        i386/chkstk2.S)
+  endif()
+
+  set(i686_SOURCES
+      ${i386_SOURCES})
+else () # MSVC
+  # Use C versions of functions when building on MSVC
+  # MSVC's assembler takes Intel syntax, not AT&T syntax
+  set(x86_64_SOURCES
+      x86_64/floatdidf.c
+      x86_64/floatdisf.c
+      x86_64/floatdixf.c
+      ${GENERIC_SOURCES})
+  set(x86_64h_SOURCES ${x86_64_SOURCES})
+  set(i386_SOURCES ${GENERIC_SOURCES})
+  set(i686_SOURCES ${i386_SOURCES})
+endif () # if (NOT MSVC)
 
 set(arm_SOURCES
   arm/adddf3vfp.S
@@ -215,6 +249,8 @@ set(arm_SOURCES
   arm/aeabi_uldivmod.S
   arm/bswapdi2.S
   arm/bswapsi2.S
+  arm/clzdi2.S
+  arm/clzsi2.S
   arm/comparesf2.S
   arm/divdf3vfp.S
   arm/divmodsi4.S
@@ -302,53 +338,33 @@ set(aarch64_SOURCES
   trunctfsf2.c
   ${GENERIC_SOURCES})
 
+set(armhf_SOURCES ${arm_SOURCES})
 set(armv7_SOURCES ${arm_SOURCES})
 set(armv7s_SOURCES ${arm_SOURCES})
 set(arm64_SOURCES ${aarch64_SOURCES})
 
+# macho_embedded archs
+set(armv6m_SOURCES ${GENERIC_SOURCES})
+set(armv7m_SOURCES ${arm_SOURCES})
+set(armv7em_SOURCES ${arm_SOURCES})
+
+set(mips_SOURCES ${GENERIC_SOURCES})
+set(mipsel_SOURCES ${mips_SOURCES})
+set(mips64_SOURCES ${mips_SOURCES})
+set(mips64el_SOURCES ${mips_SOURCES})
+
+set(wasm32_SOURCES ${GENERIC_SOURCES})
+set(wasm64_SOURCES ${GENERIC_SOURCES})
+
 add_custom_target(builtins)
 
 if (APPLE)
-  foreach (os ${BUILTIN_SUPPORTED_OS})
-    list_union(DARWIN_BUILTIN_ARCHS DARWIN_${os}_ARCHS BUILTIN_SUPPORTED_ARCH)
-    set(${os}_builtin_libs)
-    set(${os}_builtin_lipo_flags)
-    foreach (arch ${DARWIN_BUILTIN_ARCHS})
-      # Filter out generic versions of routines that are re-implemented in
-      # architecture specific manner.  This prevents multiple definitions of the
-      # same symbols, making the symbol selection non-deterministic.
-      foreach (_file ${${arch}_SOURCES})
-        if (${_file} MATCHES ${arch}/*)
-          get_filename_component(_name ${_file} NAME)
-          string(REPLACE ".S" ".c" _cname "${_name}")
-          list(REMOVE_ITEM ${arch}_SOURCES ${_cname})
-        endif ()
-      endforeach ()
-
-      add_compiler_rt_runtime(clang_rt.builtins_${arch} STATIC
-                              OS ${os}
-                              ARCHS ${arch}
-                              SOURCES ${${arch}_SOURCES}
-                              CFLAGS "-std=c99" ${DARWIN_${os}_CFLAGS} -arch ${arch}
-                              PARENT_TARGET builtins)
-      list(APPEND ${os}_builtin_libs clang_rt.builtins_${arch}_${os})
-      list(APPEND ${os}_builtin_lipo_flags -arch ${arch} 
-        ${COMPILER_RT_LIBRARY_OUTPUT_DIR}/libclang_rt.builtins_${arch}_${os}.a)
-    endforeach()
-
-    if(${os}_builtin_libs)
-      add_custom_command(OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/libclang_rt.builtins_${os}.a
-        COMMAND lipo -output
-                ${COMPILER_RT_LIBRARY_OUTPUT_DIR}/libclang_rt.builtins_${os}.a
-                -create ${${os}_builtin_lipo_flags}
-        DEPENDS ${${os}_builtin_libs}
-        )
-      add_custom_target(clang_rt.builtins_${os}
-        DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/libclang_rt.builtins_${os}.a)
-      add_dependencies(builtins clang_rt.builtins_${os})
-    endif()
-  endforeach()
+  add_subdirectory(Darwin-excludes)
+  add_subdirectory(macho_embedded)
+  darwin_add_builtin_libraries(${BUILTIN_SUPPORTED_OS})
 elseif (NOT WIN32 OR MINGW)
+  append_string_if(COMPILER_RT_HAS_STD_C99_FLAG -std=c99 maybe_stdc99)
+
   foreach (arch ${BUILTIN_SUPPORTED_ARCH})
     if (CAN_TARGET_${arch})
       # Filter out generic versions of routines that are re-implemented in
@@ -366,7 +382,7 @@ elseif (NOT WIN32 OR MINGW)
                               STATIC
                               ARCHS ${arch}
                               SOURCES ${${arch}_SOURCES}
-                              CFLAGS "-std=c99"
+                              CFLAGS ${maybe_stdc99}
                               PARENT_TARGET builtins)
     endif ()
   endforeach ()
