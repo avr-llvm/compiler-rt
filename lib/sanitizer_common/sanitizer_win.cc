@@ -700,7 +700,7 @@ void InstallDeadlySignalHandlers(SignalHandlerType handler) {
   // FIXME: Decide what to do on Windows.
 }
 
-bool IsDeadlySignal(int signum) {
+bool IsHandledDeadlySignal(int signum) {
   // FIXME: Decide what to do on Windows.
   return false;
 }
@@ -788,6 +788,8 @@ bool IsProcessRunning(pid_t pid) {
   // FIXME: implement on this platform.
   return false;
 }
+
+int WaitForProcess(pid_t pid) { return -1; }
 
 }  // namespace __sanitizer
 

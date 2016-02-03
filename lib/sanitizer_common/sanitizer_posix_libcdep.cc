@@ -169,7 +169,7 @@ void UnsetAlternateSignalStack() {
 typedef void (*sa_sigaction_t)(int, siginfo_t *, void *);
 static void MaybeInstallSigaction(int signum,
                                   SignalHandlerType handler) {
-  if (!IsDeadlySignal(signum))
+  if (!IsHandledDeadlySignal(signum))
     return;
   struct sigaction sigact;
   internal_memset(&sigact, 0, sizeof(sigact));
@@ -365,7 +365,7 @@ pid_t StartSubprocess(const char *program, const char *const argv[],
 
     for (int fd = sysconf(_SC_OPEN_MAX); fd > 2; fd--) internal_close(fd);
 
-    internal_execve(program, const_cast<char **>(&argv[0]), nullptr);
+    execv(program, const_cast<char **>(&argv[0]));
     internal__exit(1);
   }
 
@@ -381,6 +381,17 @@ bool IsProcessRunning(pid_t pid) {
     return false;
   }
   return waitpid_status == 0;
+}
+
+int WaitForProcess(pid_t pid) {
+  int process_status;
+  uptr waitpid_status = internal_waitpid(pid, &process_status, 0);
+  int local_errno;
+  if (internal_iserror(waitpid_status, &local_errno)) {
+    VReport(1, "Waiting on the process failed (errno %d).\n", local_errno);
+    return -1;
+  }
+  return process_status;
 }
 
 } // namespace __sanitizer
