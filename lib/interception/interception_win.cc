@@ -36,7 +36,7 @@ static void _memcpy(void *dst, void *src, size_t sz) {
 }
 
 static void WriteJumpInstruction(char *jmp_from, char *to) {
-  // jmp XXYYZZWW = E9 WW ZZ YY XX, where XXYYZZWW is an offset fromt jmp_from
+  // jmp XXYYZZWW = E9 WW ZZ YY XX, where XXYYZZWW is an offset from jmp_from
   // to the next instruction to the destination.
   ptrdiff_t offset = to - jmp_from - 5;
   *jmp_from = '\xE9';
@@ -68,6 +68,12 @@ static char *GetMemoryForTrampoline(size_t size) {
 
 // Returns 0 on error.
 static size_t RoundUpToInstrBoundary(size_t size, char *code) {
+#ifdef _WIN64
+  // TODO(wwchrome): Implement similar logic for x64 instructions.
+  // Win64 RoundUpToInstrBoundary is not supported yet.
+  __debugbreak();
+  return 0;
+#else
   size_t cursor = 0;
   while (cursor < size) {
     switch (code[cursor]) {
@@ -97,6 +103,7 @@ static size_t RoundUpToInstrBoundary(size_t size, char *code) {
         continue;
       case 0x458B:  // 8B 45 XX = mov eax, dword ptr [ebp+XXh]
       case 0x5D8B:  // 8B 5D XX = mov ebx, dword ptr [ebp+XXh]
+      case 0x7D8B:  // 8B 7D XX = mov edi, dword ptr [ebp+XXh]
       case 0xEC83:  // 83 EC XX = sub esp, XX
       case 0x75FF:  // FF 75 XX = push dword ptr [ebp+XXh]
         cursor += 3;
@@ -108,6 +115,9 @@ static size_t RoundUpToInstrBoundary(size_t size, char *code) {
       case 0x3D83:  // 83 3D XX YY ZZ WW TT = cmp TT, WWZZYYXX
         cursor += 7;
         continue;
+      case 0x7D83:  // 83 7D XX YY = cmp dword ptr [ebp+XXh], YY
+        cursor += 4;
+        continue;
     }
     switch (0x00FFFFFF & *(unsigned int*)(code + cursor)) {
       case 0x24448A:  // 8A 44 24 XX = mov eal, dword ptr [esp+XXh]
@@ -117,6 +127,11 @@ static size_t RoundUpToInstrBoundary(size_t size, char *code) {
       case 0x24748B:  // 8B 74 24 XX = mov esi, dword ptr [esp+XXh]
       case 0x247C8B:  // 8B 7C 24 XX = mov edi, dword ptr [esp+XXh]
         cursor += 4;
+        continue;
+    }
+    switch (*(unsigned int *)(code + cursor)) {
+      case 0x2444B60F:  // 0F B6 44 24 XX = movzx eax, byte ptr [esp+XXh]
+        cursor += 5;
         continue;
     }
 
@@ -131,12 +146,16 @@ static size_t RoundUpToInstrBoundary(size_t size, char *code) {
   }
 
   return cursor;
+#endif
 }
 
 bool OverrideFunction(uptr old_func, uptr new_func, uptr *orig_old_func) {
 #ifdef _WIN64
-#error OverrideFunction is not yet supported on x64
-#endif
+  // TODO(wwchrome): Implement using x64 jmp.
+  // OverrideFunction is not yet supported on x64.
+  __debugbreak();
+  return false;
+#else
   // Function overriding works basically like this:
   // We write "jmp <new_func>" (5 bytes) at the beginning of the 'old_func'
   // to override it.
@@ -181,17 +200,19 @@ bool OverrideFunction(uptr old_func, uptr new_func, uptr *orig_old_func) {
     return false;  // not clear if this failure bothers us.
 
   return true;
+#endif
 }
 
 static void **InterestingDLLsAvailable() {
   const char *InterestingDLLs[] = {
-    "kernel32.dll",
-    "msvcr110.dll", // VS2012
-    "msvcr120.dll", // VS2013
-    // NTDLL should go last as it exports some functions that we should override
-    // in the CRT [presumably only used internally].
-    "ntdll.dll", NULL
-  };
+      "kernel32.dll",
+      "msvcr110.dll",      // VS2012
+      "msvcr120.dll",      // VS2013
+      "vcruntime140.dll",  // VS2015
+      "ucrtbase.dll",      // Universal CRT
+      // NTDLL should go last as it exports some functions that we should
+      // override in the CRT [presumably only used internally].
+      "ntdll.dll", NULL};
   static void *result[ARRAY_SIZE(InterestingDLLs)] = { 0 };
   if (!result[0]) {
     for (size_t i = 0, j = 0; InterestingDLLs[i]; ++i) {
@@ -266,6 +287,71 @@ bool OverrideFunction(const char *name, uptr new_func, uptr *orig_old_func) {
   if (!GetFunctionAddressInDLLs(name, &orig_func))
     return false;
   return OverrideFunction(orig_func, new_func, orig_old_func);
+}
+
+bool OverrideImportedFunction(const char *module_to_patch,
+                              const char *imported_module,
+                              const char *function_name, uptr new_function,
+                              uptr *orig_old_func) {
+  HMODULE module = GetModuleHandleA(module_to_patch);
+  if (!module)
+    return false;
+
+  // Check that the module header is full and present.
+  RVAPtr<IMAGE_DOS_HEADER> dos_stub(module, 0);
+  RVAPtr<IMAGE_NT_HEADERS> headers(module, dos_stub->e_lfanew);
+  if (!module || dos_stub->e_magic != IMAGE_DOS_SIGNATURE || // "MZ"
+      headers->Signature != IMAGE_NT_SIGNATURE ||           // "PE\0\0"
+      headers->FileHeader.SizeOfOptionalHeader <
+          sizeof(IMAGE_OPTIONAL_HEADER)) {
+    return false;
+  }
+
+  IMAGE_DATA_DIRECTORY *import_directory =
+      &headers->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
+
+  // Iterate the list of imported DLLs. FirstThunk will be null for the last
+  // entry.
+  RVAPtr<IMAGE_IMPORT_DESCRIPTOR> imports(module,
+                                          import_directory->VirtualAddress);
+  for (; imports->FirstThunk != 0; ++imports) {
+    RVAPtr<const char> modname(module, imports->Name);
+    if (_stricmp(&*modname, imported_module) == 0)
+      break;
+  }
+  if (imports->FirstThunk == 0)
+    return false;
+
+  // We have two parallel arrays: the import address table (IAT) and the table
+  // of names. They start out containing the same data, but the loader rewrites
+  // the IAT to hold imported addresses and leaves the name table in
+  // OriginalFirstThunk alone.
+  RVAPtr<IMAGE_THUNK_DATA> name_table(module, imports->OriginalFirstThunk);
+  RVAPtr<IMAGE_THUNK_DATA> iat(module, imports->FirstThunk);
+  for (; name_table->u1.Ordinal != 0; ++name_table, ++iat) {
+    if (!IMAGE_SNAP_BY_ORDINAL(name_table->u1.Ordinal)) {
+      RVAPtr<IMAGE_IMPORT_BY_NAME> import_by_name(
+          module, name_table->u1.ForwarderString);
+      const char *funcname = &import_by_name->Name[0];
+      if (strcmp(funcname, function_name) == 0)
+        break;
+    }
+  }
+  if (name_table->u1.Ordinal == 0)
+    return false;
+
+  // Now we have the correct IAT entry. Do the swap. We have to make the page
+  // read/write first.
+  if (orig_old_func)
+    *orig_old_func = iat->u1.AddressOfData;
+  DWORD old_prot, unused_prot;
+  if (!VirtualProtect(&iat->u1.AddressOfData, 4, PAGE_EXECUTE_READWRITE,
+                      &old_prot))
+    return false;
+  iat->u1.AddressOfData = new_function;
+  if (!VirtualProtect(&iat->u1.AddressOfData, 4, old_prot, &unused_prot))
+    return false;  // Not clear if this failure bothers us.
+  return true;
 }
 
 }  // namespace __interception

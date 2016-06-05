@@ -91,7 +91,11 @@ ThreadState *cur_thread() {
 // handler will try to access the unmapped ThreadState.
 void cur_thread_finalize() {
   uptr thread_identity = (uptr)pthread_self();
-  CHECK_NE(thread_identity, main_thread_identity);
+  if (thread_identity == main_thread_identity) {
+    // Calling dispatch_main() or xpc_main() actually invokes pthread_exit to
+    // exit the main thread. Let's keep the main thread's ThreadState.
+    return;
+  }
   ThreadState **fake_tls = (ThreadState **)MemToShadow(thread_identity);
   internal_munmap(*fake_tls, sizeof(ThreadState));
   *fake_tls = nullptr;
@@ -131,10 +135,12 @@ static void my_pthread_introspection_hook(unsigned int event, pthread_t thread,
   if (event == PTHREAD_INTROSPECTION_THREAD_CREATE) {
     if (thread == pthread_self()) {
       // The current thread is a newly created GCD worker thread.
+      ThreadState *thr = cur_thread();
+      Processor *proc = ProcCreate();
+      ProcWire(proc, thr);
       ThreadState *parent_thread_state = nullptr;  // No parent.
       int tid = ThreadCreate(parent_thread_state, 0, (uptr)thread, true);
       CHECK_NE(tid, 0);
-      ThreadState *thr = cur_thread();
       ThreadStart(thr, tid, GetTid());
     }
   } else if (event == PTHREAD_INTROSPECTION_THREAD_TERMINATE) {
@@ -182,10 +188,6 @@ int call_pthread_cancel_with_cleanup(int(*fn)(void *c, void *m,
   return res;
 }
 #endif
-
-bool IsGlobalVar(uptr addr) {
-  return false;
-}
 
 }  // namespace __tsan
 

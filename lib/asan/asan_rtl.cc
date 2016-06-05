@@ -86,8 +86,8 @@ void ShowStatsAndAbort() {
 // Reserve memory range [beg, end].
 // We need to use inclusive range because end+1 may not be representable.
 void ReserveShadowMemoryRange(uptr beg, uptr end, const char *name) {
-  CHECK_EQ((beg % GetPageSizeCached()), 0);
-  CHECK_EQ(((end + 1) % GetPageSizeCached()), 0);
+  CHECK_EQ((beg % GetMmapGranularity()), 0);
+  CHECK_EQ(((end + 1) % GetMmapGranularity()), 0);
   uptr size = end - beg + 1;
   DecreaseTotalMmap(size);  // Don't count the shadow against mmap_limit_mb.
   void *res = MmapFixedNoReserve(beg, size, name);
@@ -320,26 +320,26 @@ static void InitializeHighMemEnd() {
   kHighMemEnd = GetMaxVirtualAddress();
   // Increase kHighMemEnd to make sure it's properly
   // aligned together with kHighMemBeg:
-  kHighMemEnd |= SHADOW_GRANULARITY * GetPageSizeCached() - 1;
+  kHighMemEnd |= SHADOW_GRANULARITY * GetMmapGranularity() - 1;
 #endif  // !ASAN_FIXED_MAPPING
-  CHECK_EQ((kHighMemBeg % GetPageSizeCached()), 0);
+  CHECK_EQ((kHighMemBeg % GetMmapGranularity()), 0);
 }
 
 static void ProtectGap(uptr addr, uptr size) {
   if (!flags()->protect_shadow_gap)
     return;
-  void *res = MmapNoAccess(addr, size, "shadow gap");
+  void *res = MmapFixedNoAccess(addr, size, "shadow gap");
   if (addr == (uptr)res)
     return;
   // A few pages at the start of the address space can not be protected.
   // But we really want to protect as much as possible, to prevent this memory
   // being returned as a result of a non-FIXED mmap().
   if (addr == kZeroBaseShadowStart) {
-    uptr step = GetPageSizeCached();
+    uptr step = GetMmapGranularity();
     while (size > step && addr < kZeroBaseMaxShadowStart) {
       addr += step;
       size -= step;
-      void *res = MmapNoAccess(addr, size, "shadow gap");
+      void *res = MmapFixedNoAccess(addr, size, "shadow gap");
       if (addr == (uptr)res)
         return;
     }
@@ -415,6 +415,7 @@ static void AsanInitInternal() {
 
   AsanCheckIncompatibleRT();
   AsanCheckDynamicRTPrereqs();
+  AvoidCVE_2016_2143();
 
   SetCanPoisonMemory(flags()->poison_heap);
   SetMallocContextSize(common_flags()->malloc_context_size);
@@ -551,6 +552,15 @@ static void AsanInitInternal() {
 #endif
 
   InitializeSuppressions();
+
+  {
+#if CAN_SANITIZE_LEAKS
+    // LateInitialize() calls dlsym, which can allocate an error string buffer
+    // in the TLS.  Let's ignore the allocation to avoid reporting a leak.
+    __lsan::ScopedInterceptorDisabler disabler;
+#endif
+    Symbolizer::LateInitialize();
+  }
 
   VReport(1, "AddressSanitizer Init done\n");
 }

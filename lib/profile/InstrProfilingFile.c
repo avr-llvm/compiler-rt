@@ -14,21 +14,27 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#ifdef COMPILER_RT_HAS_UNAME
-#include <sys/utsname.h>
+#ifdef _MSC_VER
+/* For _alloca. */
+#include <malloc.h>
 #endif
 
-#define UNCONST(ptr) ((void *)(uintptr_t)(ptr))
+#define MAX_PID_SIZE 16
+/* Data structure holding the result of parsed filename pattern.  */
+typedef struct lprofFilename {
+  /* File name string possibly with %p or %h specifiers. */
+  const char *FilenamePat;
+  char PidChars[MAX_PID_SIZE];
+  char Hostname[COMPILER_RT_MAX_HOSTLEN];
+  unsigned NumPids;
+  unsigned NumHosts;
+} lprofFilename;
 
-#ifdef COMPILER_RT_HAS_UNAME
-int GetHostName(char *Name, int Len) {
-    struct utsname N;
-    int R;
-    if (!(R = uname(&N)))
-      strncpy(Name, N.nodename, Len);
-    return R;
-}
-#endif
+lprofFilename lprofCurFilename = {0, {0}, {0}, 0, 0};
+
+int getpid(void);
+static int getCurFilenameLength();
+static const char *getCurFilename(char *FilenameBuf);
 
 /* Return 1 if there is an error, otherwise return  0.  */
 static uint32_t fileWriter(ProfDataIOVec *IOVecs, uint32_t NumIOVecs,
@@ -44,59 +50,57 @@ static uint32_t fileWriter(ProfDataIOVec *IOVecs, uint32_t NumIOVecs,
 }
 
 COMPILER_RT_VISIBILITY ProfBufferIO *
-llvmCreateBufferIOInternal(void *File, uint32_t BufferSz) {
-  CallocHook = calloc;
-  FreeHook = free;
-  return llvmCreateBufferIO(fileWriter, File, BufferSz);
-}
-
-static int writeFile(FILE *File) {
-  const char *BufferSzStr = 0;
-  uint64_t ValueDataSize = 0;
-  struct ValueProfData **ValueDataArray =
-      __llvm_profile_gather_value_data(&ValueDataSize);
+lprofCreateBufferIOInternal(void *File, uint32_t BufferSz) {
   FreeHook = &free;
-  CallocHook = &calloc;
-  BufferSzStr = getenv("LLVM_VP_BUFFER_SIZE");
-  if (BufferSzStr && BufferSzStr[0])
-    VPBufferSize = atoi(BufferSzStr);
-  return llvmWriteProfData(fileWriter, File, ValueDataArray, ValueDataSize);
+  DynamicBufferIOBuffer = (uint8_t *)calloc(BufferSz, 1);
+  VPBufferSize = BufferSz;
+  return lprofCreateBufferIO(fileWriter, File);
 }
 
-static int writeFileWithName(const char *OutputName) {
+static void setupIOBuffer() {
+  const char *BufferSzStr = 0;
+  BufferSzStr = getenv("LLVM_VP_BUFFER_SIZE");
+  if (BufferSzStr && BufferSzStr[0]) {
+    VPBufferSize = atoi(BufferSzStr);
+    DynamicBufferIOBuffer = (uint8_t *)calloc(VPBufferSize, 1);
+  }
+}
+
+/* Write profile data to file \c OutputName.  */
+static int writeFile(const char *OutputName) {
   int RetVal;
   FILE *OutputFile;
-  if (!OutputName || !OutputName[0])
-    return -1;
 
   /* Append to the file to support profiling multiple shared objects. */
   OutputFile = fopen(OutputName, "ab");
   if (!OutputFile)
     return -1;
 
-  RetVal = writeFile(OutputFile);
+  FreeHook = &free;
+  setupIOBuffer();
+  RetVal = lprofWriteData(fileWriter, OutputFile, lprofGetVPDataReader());
 
   fclose(OutputFile);
   return RetVal;
 }
 
-COMPILER_RT_WEAK int __llvm_profile_OwnsFilename = 0;
-COMPILER_RT_WEAK const char *__llvm_profile_CurrentFilename = NULL;
-
 static void truncateCurrentFile(void) {
   const char *Filename;
+  char *FilenameBuf;
   FILE *File;
+  int Length;
 
-  Filename = __llvm_profile_CurrentFilename;
-  if (!Filename || !Filename[0])
+  Length = getCurFilenameLength();
+  FilenameBuf = (char *)COMPILER_RT_ALLOCA(Length + 1);
+  Filename = getCurFilename(FilenameBuf);
+  if (!Filename)
     return;
 
   /* Create the directory holding the file, if needed. */
-  if (strchr(Filename, '/')) {
-    char *Copy = malloc(strlen(Filename) + 1);
-    strcpy(Copy, Filename);
+  if (strchr(Filename, '/') || strchr(Filename, '\\')) {
+    char *Copy = (char *)COMPILER_RT_ALLOCA(Length + 1);
+    strncpy(Copy, Filename, Length + 1);
     __llvm_profile_recursive_mkdir(Copy);
-    free(Copy);
   }
 
   /* Truncate the file.  Later we'll reopen and append. */
@@ -106,152 +110,193 @@ static void truncateCurrentFile(void) {
   fclose(File);
 }
 
-static void setFilename(const char *Filename, int OwnsFilename) {
-  /* Check if this is a new filename and therefore needs truncation. */
-  int NewFile = !__llvm_profile_CurrentFilename ||
-      (Filename && strcmp(Filename, __llvm_profile_CurrentFilename));
-  if (__llvm_profile_OwnsFilename)
-    free(UNCONST(__llvm_profile_CurrentFilename));
+static void resetFilenameToDefault(void) {
+  memset(&lprofCurFilename, 0, sizeof(lprofCurFilename));
+  lprofCurFilename.FilenamePat = "default.profraw";
+}
 
-  __llvm_profile_CurrentFilename = Filename;
-  __llvm_profile_OwnsFilename = OwnsFilename;
+/* Parses the pattern string \p FilenamePat and store the result to
+ * lprofcurFilename structure. */
 
-  /* If not a new file, append to support profiling multiple shared objects. */
+static int parseFilenamePattern(const char *FilenamePat) {
+  int NumPids = 0, NumHosts = 0, I;
+  char *PidChars = &lprofCurFilename.PidChars[0];
+  char *Hostname = &lprofCurFilename.Hostname[0];
+
+  lprofCurFilename.FilenamePat = FilenamePat;
+  /* Check the filename for "%p", which indicates a pid-substitution. */
+  for (I = 0; FilenamePat[I]; ++I)
+    if (FilenamePat[I] == '%') {
+      if (FilenamePat[++I] == 'p') {
+        if (!NumPids++) {
+          if (snprintf(PidChars, MAX_PID_SIZE, "%d", getpid()) <= 0) {
+            PROF_WARN(
+                "Unable to parse filename pattern %s. Using the default name.",
+                FilenamePat);
+            return -1;
+          }
+        }
+      } else if (FilenamePat[I] == 'h') {
+        if (!NumHosts++)
+          if (COMPILER_RT_GETHOSTNAME(Hostname, COMPILER_RT_MAX_HOSTLEN)) {
+            PROF_WARN(
+                "Unable to parse filename pattern %s. Using the default name.",
+                FilenamePat);
+            return -1;
+          }
+      }
+    }
+
+  lprofCurFilename.NumPids = NumPids;
+  lprofCurFilename.NumHosts = NumHosts;
+  return 0;
+}
+
+static void parseAndSetFilename(const char *FilenamePat) {
+  int NewFile;
+  const char *OldFilenamePat = lprofCurFilename.FilenamePat;
+
+  if (!FilenamePat || parseFilenamePattern(FilenamePat))
+    resetFilenameToDefault();
+
+  NewFile =
+      !OldFilenamePat || (strcmp(OldFilenamePat, lprofCurFilename.FilenamePat));
+
   if (NewFile)
     truncateCurrentFile();
 }
 
-static void resetFilenameToDefault(void) { setFilename("default.profraw", 0); }
-
-int getpid(void);
-static int setFilenamePossiblyWithPid(const char *Filename) {
-#define MAX_PID_SIZE 16
-  char PidChars[MAX_PID_SIZE] = {0};
-  int NumPids = 0, PidLength = 0, NumHosts = 0, HostNameLength = 0;
-  char *Allocated;
-  int I, J;
-  char Hostname[COMPILER_RT_MAX_HOSTLEN];
-
-  /* Reset filename on NULL, except with env var which is checked by caller. */
-  if (!Filename) {
-    resetFilenameToDefault();
+/* Return buffer length that is required to store the current profile
+ * filename with PID and hostname substitutions. */
+static int getCurFilenameLength() {
+  if (!lprofCurFilename.FilenamePat || !lprofCurFilename.FilenamePat[0])
     return 0;
-  }
 
-  /* Check the filename for "%p", which indicates a pid-substitution. */
-  for (I = 0; Filename[I]; ++I)
-    if (Filename[I] == '%') {
-      if (Filename[++I] == 'p') {
-        if (!NumPids++) {
-          PidLength = snprintf(PidChars, MAX_PID_SIZE, "%d", getpid());
-          if (PidLength <= 0)
-            return -1;
-        }
-      } else if (Filename[I] == 'h') {
-        if (!NumHosts++)
-          if (COMPILER_RT_GETHOSTNAME(Hostname, COMPILER_RT_MAX_HOSTLEN))
-            return -1;
-          HostNameLength = strlen(Hostname);
-      }
-    }
+  if (!(lprofCurFilename.NumPids || lprofCurFilename.NumHosts))
+    return strlen(lprofCurFilename.FilenamePat);
 
-  if (!(NumPids || NumHosts)) {
-    setFilename(Filename, 0);
+  return strlen(lprofCurFilename.FilenamePat) +
+         lprofCurFilename.NumPids * (strlen(lprofCurFilename.PidChars) - 2) +
+         lprofCurFilename.NumHosts * (strlen(lprofCurFilename.Hostname) - 2);
+}
+
+/* Return the pointer to the current profile file name (after substituting
+ * PIDs and Hostnames in filename pattern. \p FilenameBuf is the buffer
+ * to store the resulting filename. If no substitution is needed, the
+ * current filename pattern string is directly returned. */
+static const char *getCurFilename(char *FilenameBuf) {
+  int I, J, PidLength, HostNameLength;
+  const char *FilenamePat = lprofCurFilename.FilenamePat;
+
+  if (!lprofCurFilename.FilenamePat || !lprofCurFilename.FilenamePat[0])
     return 0;
-  }
 
-  /* Allocate enough space for the substituted filename. */
-  Allocated = malloc(I + NumPids*(PidLength - 2) +
-                     NumHosts*(HostNameLength - 2) + 1);
-  if (!Allocated)
-    return -1;
+  if (!(lprofCurFilename.NumPids || lprofCurFilename.NumHosts))
+    return lprofCurFilename.FilenamePat;
 
+  PidLength = strlen(lprofCurFilename.PidChars);
+  HostNameLength = strlen(lprofCurFilename.Hostname);
   /* Construct the new filename. */
-  for (I = 0, J = 0; Filename[I]; ++I)
-    if (Filename[I] == '%') {
-      if (Filename[++I] == 'p') {
-        memcpy(Allocated + J, PidChars, PidLength);
+  for (I = 0, J = 0; FilenamePat[I]; ++I)
+    if (FilenamePat[I] == '%') {
+      if (FilenamePat[++I] == 'p') {
+        memcpy(FilenameBuf + J, lprofCurFilename.PidChars, PidLength);
         J += PidLength;
-      }
-      else if (Filename[I] == 'h') {
-        memcpy(Allocated + J, Hostname, HostNameLength);
+      } else if (FilenamePat[I] == 'h') {
+        memcpy(FilenameBuf + J, lprofCurFilename.Hostname, HostNameLength);
         J += HostNameLength;
       }
       /* Drop any unknown substitutions. */
     } else
-      Allocated[J++] = Filename[I];
-  Allocated[J] = 0;
+      FilenameBuf[J++] = FilenamePat[I];
+  FilenameBuf[J] = 0;
 
-  /* Use the computed name. */
-  setFilename(Allocated, 1);
-  return 0;
+  return FilenameBuf;
 }
 
-static int setFilenameFromEnvironment(void) {
+/* Returns the pointer to the environment variable
+ * string. Returns null if the env var is not set. */
+static const char *getFilenamePatFromEnv(void) {
   const char *Filename = getenv("LLVM_PROFILE_FILE");
-
   if (!Filename || !Filename[0])
-    return -1;
-
-  return setFilenamePossiblyWithPid(Filename);
+    return 0;
+  return Filename;
 }
 
-static void setFilenameAutomatically(void) {
-  if (!setFilenameFromEnvironment())
-    return;
-
-  resetFilenameToDefault();
-}
-
+/* This method is invoked by the runtime initialization hook
+ * InstrProfilingRuntime.o if it is linked in. Both user specified
+ * profile path via -fprofile-instr-generate= and LLVM_PROFILE_FILE
+ * environment variable can override this default value. */
 COMPILER_RT_VISIBILITY
 void __llvm_profile_initialize_file(void) {
+  const char *FilenamePat;
   /* Check if the filename has been initialized. */
-  if (__llvm_profile_CurrentFilename)
+  if (lprofCurFilename.FilenamePat)
     return;
 
   /* Detect the filename and truncate. */
-  setFilenameAutomatically();
+  FilenamePat = getFilenamePatFromEnv();
+  parseAndSetFilename(FilenamePat);
 }
 
+/* This API is directly called by the user application code. It has the
+ * highest precedence compared with LLVM_PROFILE_FILE environment variable
+ * and command line option -fprofile-instr-generate=<profile_name>.
+ */
 COMPILER_RT_VISIBILITY
-void __llvm_profile_set_filename(const char *Filename) {
-  setFilenamePossiblyWithPid(Filename);
+void __llvm_profile_set_filename(const char *FilenamePat) {
+  parseAndSetFilename(FilenamePat);
 }
 
+/*
+ * This API is invoked by the global initializers emitted by Clang/LLVM when
+ * -fprofile-instr-generate=<..> is specified (vs -fprofile-instr-generate
+ *  without an argument). This option has lower precedence than the
+ *  LLVM_PROFILE_FILE environment variable.
+ */
 COMPILER_RT_VISIBILITY
-void __llvm_profile_override_default_filename(const char *Filename) {
+void __llvm_profile_override_default_filename(const char *FilenamePat) {
   /* If the env var is set, skip setting filename from argument. */
-  const char *Env_Filename = getenv("LLVM_PROFILE_FILE");
-  if (Env_Filename && Env_Filename[0])
+  const char *Env_Filename = getFilenamePatFromEnv();
+  if (Env_Filename)
     return;
-  setFilenamePossiblyWithPid(Filename);
+
+  parseAndSetFilename(FilenamePat);
 }
 
+/* The public API for writing profile data into the file with name
+ * set by previous calls to __llvm_profile_set_filename or
+ * __llvm_profile_override_default_filename or
+ * __llvm_profile_initialize_file. */
 COMPILER_RT_VISIBILITY
 int __llvm_profile_write_file(void) {
-  int rc;
+  int rc, Length;
+  const char *Filename;
+  char *FilenameBuf;
 
-  GetEnvHook = &getenv;
+  Length = getCurFilenameLength();
+  FilenameBuf = (char *)COMPILER_RT_ALLOCA(Length + 1);
+  Filename = getCurFilename(FilenameBuf);
+
   /* Check the filename. */
-  if (!__llvm_profile_CurrentFilename) {
-    PROF_ERR("LLVM Profile: Failed to write file : %s\n", "Filename not set");
+  if (!Filename) {
+    PROF_ERR("Failed to write file : %s\n", "Filename not set");
     return -1;
   }
 
   /* Check if there is llvm/runtime version mismatch.  */
   if (GET_VERSION(__llvm_profile_get_version()) != INSTR_PROF_RAW_VERSION) {
-    PROF_ERR("LLVM Profile: runtime and instrumentation version mismatch : "
+    PROF_ERR("Runtime and instrumentation version mismatch : "
              "expected %d, but get %d\n",
              INSTR_PROF_RAW_VERSION,
              (int)GET_VERSION(__llvm_profile_get_version()));
     return -1;
   }
 
-  /* Write the file. */
-  rc = writeFileWithName(__llvm_profile_CurrentFilename);
+  /* Write profile data to the file. */
+  rc = writeFile(Filename);
   if (rc)
-    PROF_ERR("LLVM Profile: Failed to write file \"%s\": %s\n",
-            __llvm_profile_CurrentFilename, strerror(errno));
+    PROF_ERR("Failed to write file \"%s\": %s\n", Filename, strerror(errno));
   return rc;
 }
 
@@ -263,6 +308,8 @@ int __llvm_profile_register_write_file_atexit(void) {
 
   if (HasBeenRegistered)
     return 0;
+
+  lprofSetupValueProfiler();
 
   HasBeenRegistered = 1;
   return atexit(writeFileWithoutReturn);

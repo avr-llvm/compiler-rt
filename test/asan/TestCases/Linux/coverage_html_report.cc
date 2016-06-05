@@ -1,5 +1,5 @@
-// REQUIRES: has_sancovcc, x86_64-linux
-// RUN: %clangxx_asan -fsanitize-coverage=func %s -o %t
+// REQUIRES: has_sancovcc, x86_64-linux, asan-dynamic-runtime
+// RUN: %clangxx_asan_static -fsanitize-coverage=func %s -o %t
 // RUN: rm -rf %T/coverage_html_report
 // RUN: mkdir -p %T/coverage_html_report
 // RUN: cd %T/coverage_html_report
@@ -20,5 +20,5 @@ int main(int argc, char **argv) {
 
 // CHECK-main: PID: [[PID:[0-9]+]]
 // CHECK-main: [[PID]].sancov: 2 PCs written
-// CHECK-main: html report generated to ./coverage_html_report.cc.tmp.[[PID]].html
+// CHECK-main: coverage report generated to ./coverage_html_report.cc.tmp.[[PID]].html
 // CHECK-ls: coverage_html_report.cc.tmp.{{[0-9]+}}.html

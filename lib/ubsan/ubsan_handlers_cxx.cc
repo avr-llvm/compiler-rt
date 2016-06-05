@@ -55,11 +55,17 @@ static bool HandleDynamicTypeCacheMiss(
     << TypeCheckKinds[Data->TypeCheckKind] << (void*)Pointer << Data->Type;
 
   // If possible, say what type it actually points to.
-  if (!DTI.isValid())
-    Diag(Pointer, DL_Note, "object has invalid vptr")
-        << TypeName(DTI.getMostDerivedTypeName())
-        << Range(Pointer, Pointer + sizeof(uptr), "invalid vptr");
-  else if (!DTI.getOffset())
+  if (!DTI.isValid()) {
+    if (DTI.getOffset() < -VptrMaxOffsetToTop || DTI.getOffset() > VptrMaxOffsetToTop) {
+      Diag(Pointer, DL_Note, "object has a possibly invalid vptr: abs(offset to top) too big")
+          << TypeName(DTI.getMostDerivedTypeName())
+          << Range(Pointer, Pointer + sizeof(uptr), "possibly invalid vptr");
+    } else {
+      Diag(Pointer, DL_Note, "object has invalid vptr")
+          << TypeName(DTI.getMostDerivedTypeName())
+          << Range(Pointer, Pointer + sizeof(uptr), "invalid vptr");
+    }
+  } else if (!DTI.getOffset())
     Diag(Pointer, DL_Note, "object is of type %0")
         << TypeName(DTI.getMostDerivedTypeName())
         << Range(Pointer, Pointer + sizeof(uptr), "vptr for %0");
@@ -90,7 +96,7 @@ void __ubsan::__ubsan_handle_dynamic_type_cache_miss_abort(
 
 namespace __ubsan {
 void HandleCFIBadType(CFICheckFailData *Data, ValueHandle Vtable,
-                      ReportOptions Opts) {
+                      bool ValidVtable, ReportOptions Opts) {
   SourceLocation Loc = Data->Loc.acquire();
   ErrorType ET = ErrorType::CFIBadType;
 
@@ -98,7 +104,9 @@ void HandleCFIBadType(CFICheckFailData *Data, ValueHandle Vtable,
     return;
 
   ScopedReport R(Opts, Loc, ET);
-  DynamicTypeInfo DTI = getDynamicTypeInfoFromVtable((void *)Vtable);
+  DynamicTypeInfo DTI = ValidVtable
+                            ? getDynamicTypeInfoFromVtable((void *)Vtable)
+                            : DynamicTypeInfo(0, 0, 0);
 
   const char *CheckKindStr;
   switch (Data->CheckKind) {
@@ -123,11 +131,16 @@ void HandleCFIBadType(CFICheckFailData *Data, ValueHandle Vtable,
       << Data->Type << CheckKindStr << (void *)Vtable;
 
   // If possible, say what type it actually points to.
-  if (!DTI.isValid())
-    Diag(Vtable, DL_Note, "invalid vtable");
-  else
+  if (!DTI.isValid()) {
+    const char *module = Symbolizer::GetOrInit()->GetModuleNameForPc(Vtable);
+    if (module)
+      Diag(Vtable, DL_Note, "invalid vtable in module %0") << module;
+    else
+      Diag(Vtable, DL_Note, "invalid vtable");
+  } else {
     Diag(Vtable, DL_Note, "vtable is of type %0")
         << TypeName(DTI.getMostDerivedTypeName());
+  }
 }
 }  // namespace __ubsan
 

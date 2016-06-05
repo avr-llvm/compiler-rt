@@ -22,6 +22,7 @@ if(APPLE)
 endif()
 
 foreach(arch ${TSAN_TEST_ARCH})
+  set(TSAN_TEST_TARGET_ARCH ${arch})
   string(TOLOWER "-${arch}" TSAN_TEST_CONFIG_SUFFIX)
   if(ANDROID OR ${arch} MATCHES "arm|aarch64")
     # This is only true if we are cross-compiling.
@@ -47,6 +48,7 @@ if(COMPILER_RT_INCLUDE_TESTS)
     ${CMAKE_CURRENT_SOURCE_DIR}/Unit/lit.site.cfg.in
     ${CMAKE_CURRENT_BINARY_DIR}/Unit/lit.site.cfg)
   list(APPEND TSAN_TEST_DEPS TsanUnitTests)
+  list(APPEND TSAN_TESTSUITES ${CMAKE_CURRENT_BINARY_DIR}/Unit)
 endif()
 
 add_lit_testsuite(check-tsan "Running ThreadSanitizer tests"

@@ -23,7 +23,7 @@
 #include "sanitizer_list.h"
 #include "sanitizer_mutex.h"
 
-#ifdef _MSC_VER
+#if defined(_MSC_VER) && !defined(__clang__)
 extern "C" void _ReadWriteBarrier();
 #pragma intrinsic(_ReadWriteBarrier)
 #endif
@@ -43,9 +43,6 @@ const uptr kWordSizeInBits = 8 * kWordSize;
 #endif
 
 const uptr kMaxPathLength = 4096;
-
-// 16K loaded modules should be enough for everyone.
-static const uptr kMaxNumberOfModules = 1 << 14;
 
 const uptr kMaxThreadStackSize = 1 << 30;  // 1Gb
 
@@ -87,10 +84,11 @@ void *MmapFixedNoReserve(uptr fixed_addr, uptr size,
                          const char *name = nullptr);
 void *MmapNoReserveOrDie(uptr size, const char *mem_type);
 void *MmapFixedOrDie(uptr fixed_addr, uptr size);
-void *MmapNoAccess(uptr fixed_addr, uptr size, const char *name = nullptr);
+void *MmapFixedNoAccess(uptr fixed_addr, uptr size, const char *name = nullptr);
+void *MmapNoAccess(uptr size);
 // Map aligned chunk of address space; size and alignment are powers of two.
 void *MmapAlignedOrDie(uptr size, uptr alignment, const char *mem_type);
-// Disallow access to a memory range.  Use MmapNoAccess to allocate an
+// Disallow access to a memory range.  Use MmapFixedNoAccess to allocate an
 // unaccessible memory.
 bool MprotectNoAccess(uptr addr, uptr size);
 bool MprotectReadOnly(uptr addr, uptr size);
@@ -300,6 +298,7 @@ void ReExec();
 char **GetArgv();
 void PrintCmdline();
 bool StackSizeIsUnlimited();
+uptr GetStackSizeLimitInBytes();
 void SetStackSizeLimitInBytes(uptr limit);
 bool AddressSpaceIsUnlimited();
 void SetAddressSpaceUnlimited();
@@ -513,7 +512,7 @@ class InternalMmapVectorNoCtor {
       uptr new_capacity = RoundUpToPowerOfTwo(size_ + 1);
       Resize(new_capacity);
     }
-    data_[size_++] = element;
+    internal_memcpy(&data_[size_++], &element, sizeof(T));
   }
   T &back() {
     CHECK_GT(size_, 0);
@@ -666,13 +665,33 @@ class LoadedModule {
   IntrusiveList<AddressRange> ranges_;
 };
 
-// OS-dependent function that fills array with descriptions of at most
-// "max_modules" currently loaded modules. Returns the number of
-// initialized modules. If filter is nonzero, ignores modules for which
-// filter(full_name) is false.
-typedef bool (*string_predicate_t)(const char *);
-uptr GetListOfModules(LoadedModule *modules, uptr max_modules,
-                      string_predicate_t filter);
+// List of LoadedModules. OS-dependent implementation is responsible for
+// filling this information.
+class ListOfModules {
+ public:
+  ListOfModules() : modules_(kInitialCapacity) {}
+  ~ListOfModules() { clear(); }
+  void init();
+  const LoadedModule *begin() const { return modules_.begin(); }
+  LoadedModule *begin() { return modules_.begin(); }
+  const LoadedModule *end() const { return modules_.end(); }
+  LoadedModule *end() { return modules_.end(); }
+  uptr size() const { return modules_.size(); }
+  const LoadedModule &operator[](uptr i) const {
+    CHECK_LT(i, modules_.size());
+    return modules_[i];
+  }
+
+ private:
+  void clear() {
+    for (auto &module : modules_) module.clear();
+    modules_.clear();
+  }
+
+  InternalMmapVector<LoadedModule> modules_;
+  // We rarely have more than 16K loaded modules.
+  static const uptr kInitialCapacity = 1 << 14;
+};
 
 // Callback type for iterating over a set of memory ranges.
 typedef void (*RangeIteratorCallback)(uptr begin, uptr end, void *arg);
@@ -736,7 +755,7 @@ void MaybeStartBackgroudThread();
 // compiler from recognising it and turning it into an actual call to
 // memset/memcpy/etc.
 static inline void SanitizerBreakOptimization(void *arg) {
-#if _MSC_VER && !defined(__clang__)
+#if defined(_MSC_VER) && !defined(__clang__)
   _ReadWriteBarrier();
 #else
   __asm__ __volatile__("" : : "r" (arg) : "memory");
@@ -749,18 +768,29 @@ struct SignalContext {
   uptr pc;
   uptr sp;
   uptr bp;
+  bool is_memory_access;
 
-  SignalContext(void *context, uptr addr, uptr pc, uptr sp, uptr bp) :
-      context(context), addr(addr), pc(pc), sp(sp), bp(bp) {
-  }
+  enum WriteFlag { UNKNOWN, READ, WRITE } write_flag;
+
+  SignalContext(void *context, uptr addr, uptr pc, uptr sp, uptr bp,
+                bool is_memory_access, WriteFlag write_flag)
+      : context(context),
+        addr(addr),
+        pc(pc),
+        sp(sp),
+        bp(bp),
+        is_memory_access(is_memory_access),
+        write_flag(write_flag) {}
 
   // Creates signal context in a platform-specific manner.
   static SignalContext Create(void *siginfo, void *context);
+
+  // Returns true if the "context" indicates a memory write.
+  static WriteFlag GetWriteFlag(void *context);
 };
 
 void GetPcSpBp(void *context, uptr *pc, uptr *sp, uptr *bp);
 
-void DisableReexec();
 void MaybeReexec();
 
 template <typename Fn>
@@ -779,6 +809,16 @@ template <typename Fn>
 RunOnDestruction<Fn> at_scope_exit(Fn fn) {
   return RunOnDestruction<Fn>(fn);
 }
+
+// Linux on 64-bit s390 had a nasty bug that crashes the whole machine
+// if a process uses virtual memory over 4TB (as many sanitizers like
+// to do).  This function will abort the process if running on a kernel
+// that looks vulnerable.
+#if SANITIZER_LINUX && SANITIZER_S390_64
+void AvoidCVE_2016_2143();
+#else
+INLINE void AvoidCVE_2016_2143() {}
+#endif
 
 }  // namespace __sanitizer
 
