@@ -26,7 +26,9 @@
 #include "sanitizer_symbolizer_libbacktrace.h"
 #include "sanitizer_symbolizer_mac.h"
 
+#include <dlfcn.h>   // for dlsym()
 #include <errno.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -61,6 +63,44 @@ const char *DemangleCXXABI(const char *name) {
   return name;
 }
 
+// As of now, there are no headers for the Swift runtime. Once they are
+// present, we will weakly link since we do not require Swift runtime to be
+// linked.
+typedef char *(*swift_demangle_ft)(const char *mangledName,
+                                   size_t mangledNameLength, char *outputBuffer,
+                                   size_t *outputBufferSize, uint32_t flags);
+static swift_demangle_ft swift_demangle_f;
+
+// This must not happen lazily at symbolication time, because dlsym uses
+// malloc and thread-local storage, which is not a good thing to do during
+// symbolication.
+static void InitializeSwiftDemangler() {
+  swift_demangle_f = (swift_demangle_ft)dlsym(RTLD_DEFAULT, "swift_demangle");
+}
+
+// Attempts to demangle a Swift name. The demangler will return nullptr if a
+// non-Swift name is passed in.
+const char *DemangleSwift(const char *name) {
+  if (!name) return nullptr;
+
+  // Check if we are dealing with a Swift mangled name first.
+  if (name[0] != '_' || name[1] != 'T') {
+    return nullptr;
+  }
+
+  if (swift_demangle_f)
+    return swift_demangle_f(name, internal_strlen(name), 0, 0, 0);
+
+  return nullptr;
+}
+
+const char *DemangleSwiftAndCXX(const char *name) {
+  if (!name) return nullptr;
+  if (const char *swift_demangled_name = DemangleSwift(name))
+    return swift_demangled_name;
+  return DemangleCXXABI(name);
+}
+
 bool SymbolizerProcess::StartSymbolizerSubprocess() {
   if (!FileExists(path_)) {
     if (!reported_invalid_path_) {
@@ -74,6 +114,13 @@ bool SymbolizerProcess::StartSymbolizerSubprocess() {
   if (use_forkpty_) {
 #if SANITIZER_MAC
     fd_t fd = kInvalidFd;
+
+    // forkpty redirects stdout and stderr into a single stream, so we would
+    // receive error messages as standard replies. To avoid that, let's dup
+    // stderr and restore it in the child.
+    int saved_stderr = dup(STDERR_FILENO);
+    CHECK_GE(saved_stderr, 0);
+
     // Use forkpty to disable buffering in the new terminal.
     pid = internal_forkpty(&fd);
     if (pid == -1) {
@@ -83,6 +130,11 @@ bool SymbolizerProcess::StartSymbolizerSubprocess() {
       return false;
     } else if (pid == 0) {
       // Child subprocess.
+
+      // Restore stderr.
+      CHECK_GE(dup2(saved_stderr, STDERR_FILENO), 0);
+      close(saved_stderr);
+
       const char *argv[kArgVMax];
       GetArgV(path_, argv);
       execv(path_, const_cast<char **>(&argv[0]));
@@ -91,6 +143,8 @@ bool SymbolizerProcess::StartSymbolizerSubprocess() {
 
     // Continue execution in parent process.
     input_fd_ = output_fd_ = fd;
+
+    close(saved_stderr);
 
     // Disable echo in the new terminal, disable CR.
     struct termios termflags;
@@ -350,7 +404,7 @@ class InternalSymbolizer : public SymbolizerTool {
 #endif  // SANITIZER_SUPPORTS_WEAK_HOOKS
 
 const char *Symbolizer::PlatformDemangle(const char *name) {
-  return DemangleCXXABI(name);
+  return DemangleSwiftAndCXX(name);
 }
 
 void Symbolizer::PlatformPrepareForSandboxing() {}
@@ -435,6 +489,11 @@ Symbolizer *Symbolizer::PlatformInit() {
   list.clear();
   ChooseSymbolizerTools(&list, &symbolizer_allocator_);
   return new(symbolizer_allocator_) Symbolizer(list);
+}
+
+void Symbolizer::LateInitialize() {
+  Symbolizer::GetOrInit();
+  InitializeSwiftDemangler();
 }
 
 }  // namespace __sanitizer

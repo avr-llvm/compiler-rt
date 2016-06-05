@@ -165,6 +165,11 @@ COMMON_FLAG(bool, symbolize_inline_frames, true,
 COMMON_FLAG(bool, symbolize_vs_style, false,
             "Print file locations in Visual Studio style (e.g: "
             " file(10,42): ...")
+COMMON_FLAG(int, dedup_token_length, 0,
+            "If positive, after printing a stack trace also print a short "
+            "string token based on this number of frames that will simplify "
+            "deduplication of the reports. "
+            "Example: 'DEDUP_TOKEN: foo-bar-main'. Default is 0.")
 COMMON_FLAG(const char *, stack_trace_format, "DEFAULT",
             "Format string used to render stack frames. "
             "See sanitizer_stacktrace_printer.h for the format description. "
@@ -182,12 +187,24 @@ COMMON_FLAG(bool, intercept_strspn, true,
 COMMON_FLAG(bool, intercept_strpbrk, true,
             "If set, uses custom wrappers for strpbrk function "
             "to find more errors.")
+COMMON_FLAG(bool, intercept_strlen, true,
+            "If set, uses custom wrappers for strlen and strnlen functions "
+            "to find more errors.")
+COMMON_FLAG(bool, intercept_strchr, true,
+            "If set, uses custom wrappers for strchr, strchrnul, and strrchr "
+            "functions to find more errors.")
 COMMON_FLAG(bool, intercept_memcmp, true,
             "If set, uses custom wrappers for memcmp function "
             "to find more errors.")
 COMMON_FLAG(bool, strict_memcmp, true,
           "If true, assume that memcmp(p1, p2, n) always reads n bytes before "
           "comparing p1 and p2.")
+COMMON_FLAG(bool, intercept_intrin, true,
+            "If set, uses custom wrappers for memset/memcpy/memmove "
+            "intrinsics to find more errors.")
+COMMON_FLAG(bool, intercept_stat, true,
+            "If set, uses custom wrappers for *stat functions "
+            "to find more errors.")
 COMMON_FLAG(bool, decorate_proc_maps, false, "If set, decorate sanitizer "
                                              "mappings in /proc/self/maps with "
                                              "user-readable names")

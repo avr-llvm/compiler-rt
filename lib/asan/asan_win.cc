@@ -46,11 +46,20 @@ void __sanitizer_default_free_hook(void *ptr) { }
 const char* __asan_default_default_options() { return ""; }
 const char* __asan_default_default_suppressions() { return ""; }
 void __asan_default_on_error() {}
+// 64-bit msvc will not prepend an underscore for symbols.
+#ifdef _WIN64
+#pragma comment(linker, "/alternatename:__sanitizer_malloc_hook=__sanitizer_default_malloc_hook")  // NOLINT
+#pragma comment(linker, "/alternatename:__sanitizer_free_hook=__sanitizer_default_free_hook")      // NOLINT
+#pragma comment(linker, "/alternatename:__asan_default_options=__asan_default_default_options")    // NOLINT
+#pragma comment(linker, "/alternatename:__asan_default_suppressions=__asan_default_default_suppressions")    // NOLINT
+#pragma comment(linker, "/alternatename:__asan_on_error=__asan_default_on_error")                  // NOLINT
+#else
 #pragma comment(linker, "/alternatename:___sanitizer_malloc_hook=___sanitizer_default_malloc_hook")  // NOLINT
 #pragma comment(linker, "/alternatename:___sanitizer_free_hook=___sanitizer_default_free_hook")      // NOLINT
 #pragma comment(linker, "/alternatename:___asan_default_options=___asan_default_default_options")    // NOLINT
 #pragma comment(linker, "/alternatename:___asan_default_suppressions=___asan_default_default_suppressions")    // NOLINT
 #pragma comment(linker, "/alternatename:___asan_on_error=___asan_default_on_error")                  // NOLINT
+#endif
 // }}}
 }  // extern "C"
 
@@ -61,6 +70,9 @@ INTERCEPTOR_WINAPI(void, RaiseException, void *a, void *b, void *c, void *d) {
   REAL(RaiseException)(a, b, c, d);
 }
 
+// TODO(wwchrome): Win64 has no _except_handler3/4.
+// Need to implement _C_specific_handler instead.
+#ifndef _WIN64
 INTERCEPTOR(int, _except_handler3, void *a, void *b, void *c, void *d) {
   CHECK(REAL(_except_handler3));
   __asan_handle_no_return();
@@ -76,6 +88,7 @@ INTERCEPTOR(int, _except_handler4, void *a, void *b, void *c, void *d) {
   __asan_handle_no_return();
   return REAL(_except_handler4)(a, b, c, d);
 }
+#endif
 
 static thread_return_t THREAD_CALLING_CONV asan_thread_start(void *arg) {
   AsanThread *t = (AsanThread*)arg;
@@ -139,14 +152,22 @@ namespace __asan {
 void InitializePlatformInterceptors() {
   ASAN_INTERCEPT_FUNC(CreateThread);
   ASAN_INTERCEPT_FUNC(RaiseException);
+
+// TODO(wwchrome): Win64 uses _C_specific_handler instead.
+#ifndef _WIN64
   ASAN_INTERCEPT_FUNC(_except_handler3);
   ASAN_INTERCEPT_FUNC(_except_handler4);
+#endif
 
   // NtWaitForWorkViaWorkerFactory is always linked dynamically.
   CHECK(::__interception::OverrideFunction(
       "NtWaitForWorkViaWorkerFactory",
       (uptr)WRAP(NtWaitForWorkViaWorkerFactory),
       (uptr *)&REAL(NtWaitForWorkViaWorkerFactory)));
+}
+
+void AsanApplyToGlobals(globals_op_fptr op, const void *needle) {
+  UNIMPLEMENTED();
 }
 
 // ---------------------- TSD ---------------- {{{
@@ -242,10 +263,16 @@ int __asan_set_seh_filter() {
 }
 
 #if !ASAN_DYNAMIC
-// Put a pointer to __asan_set_seh_filter at the end of the global list
-// of C initializers, after the default EH is set by the CRT.
-#pragma section(".CRT$XIZ", long, read)  // NOLINT
-__declspec(allocate(".CRT$XIZ"))
+// The CRT runs initializers in this order:
+// - C initializers, from XIA to XIZ
+// - C++ initializers, from XCA to XCZ
+// Prior to 2015, the CRT set the unhandled exception filter at priority XIY,
+// near the end of C initialization. Starting in 2015, it was moved to the
+// beginning of C++ initialization. We set our priority to XCAB to run
+// immediately after the CRT runs. This way, our exception filter is called
+// first and we can delegate to their filter if appropriate.
+#pragma section(".CRT$XCAB", long, read)  // NOLINT
+__declspec(allocate(".CRT$XCAB"))
     int (*__intercept_seh)() = __asan_set_seh_filter;
 #endif
 // }}}

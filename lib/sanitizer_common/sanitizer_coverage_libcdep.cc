@@ -783,9 +783,34 @@ void CoverageData::GetRangeOffsets(const NamedPcRange& r, Symbolizer* sym,
     (*offsets)[i] = UnbundlePc((*offsets)[i]);
 }
 
-static void GenerateHtmlReport(const InternalMmapVector<char *> &sancov_argv) {
-  if (!common_flags()->html_cov_report || sancov_argv[0] == nullptr) {
+static void GenerateHtmlReport(const InternalMmapVector<char *> &cov_files) {
+  if (!common_flags()->html_cov_report) {
     return;
+  }
+  char *sancov_path = FindPathToBinary(common_flags()->sancov_path);
+  if (sancov_path == nullptr) {
+    return;
+  }
+
+  InternalMmapVector<char *> sancov_argv(cov_files.size() * 2 + 3);
+  sancov_argv.push_back(sancov_path);
+  sancov_argv.push_back(internal_strdup("-html-report"));
+  auto argv_deleter = at_scope_exit([&] {
+    for (uptr i = 0; i < sancov_argv.size(); ++i) {
+      InternalFree(sancov_argv[i]);
+    }
+  });
+
+  for (const auto &cov_file : cov_files) {
+    sancov_argv.push_back(internal_strdup(cov_file));
+  }
+
+  {
+    ListOfModules modules;
+    modules.init();
+    for (const LoadedModule &module : modules) {
+      sancov_argv.push_back(internal_strdup(module.full_name()));
+    }
   }
 
   InternalScopedString report_path(kMaxPathLength);
@@ -795,10 +820,8 @@ static void GenerateHtmlReport(const InternalMmapVector<char *> &sancov_argv) {
                             kInvalidFd /* stdin */, report_fd /* std_out */);
   if (pid > 0) {
     int result = WaitForProcess(pid);
-    if (result == 0) {
-      VReport(1, " CovDump: html report generated to %s (%d)\n",
-              report_path.data(), result);
-    }
+    if (result == 0)
+      Printf("coverage report generated to %s\n", report_path.data());
   }
 }
 
@@ -809,16 +832,10 @@ void CoverageData::DumpOffsets() {
   InternalMmapVector<uptr> offsets(0);
   InternalScopedString path(kMaxPathLength);
 
-  InternalMmapVector<char *> sancov_argv(module_name_vec.size() + 2);
-  sancov_argv.push_back(FindPathToBinary(common_flags()->sancov_path));
-  if (GetArgv() != nullptr) {
-    sancov_argv.push_back(internal_strdup("-obj"));
-    sancov_argv.push_back(internal_strdup(GetArgv()[0]));
-  }
-  sancov_argv.push_back(internal_strdup("-html-report"));
-  auto argv_deleter = at_scope_exit([&] {
-    for (uptr i = 0; i < sancov_argv.size(); ++i) {
-      InternalFree(sancov_argv[i]);
+  InternalMmapVector<char *> cov_files(module_name_vec.size());
+  auto cov_files_deleter = at_scope_exit([&] {
+    for (uptr i = 0; i < cov_files.size(); ++i) {
+      InternalFree(cov_files[i]);
     }
   });
 
@@ -846,15 +863,14 @@ void CoverageData::DumpOffsets() {
       if (fd == kInvalidFd) continue;
       WriteToFile(fd, offsets.data(), offsets.size() * sizeof(offsets[0]));
       CloseFile(fd);
-      sancov_argv.push_back(internal_strdup(path.data()));
+      cov_files.push_back(internal_strdup(path.data()));
       VReport(1, " CovDump: %s: %zd PCs written\n", path.data(), num_offsets);
     }
   }
   if (cov_fd != kInvalidFd)
     CloseFile(cov_fd);
 
-  sancov_argv.push_back(nullptr);
-  GenerateHtmlReport(sancov_argv);
+  GenerateHtmlReport(cov_files);
 }
 
 void CoverageData::DumpAll() {

@@ -335,6 +335,7 @@ INTERFACE_FUNCTION(__sanitizer_update_counter_bitset_and_clear_counters)
 INTERFACE_FUNCTION(__sanitizer_sandbox_on_notify)
 INTERFACE_FUNCTION(__sanitizer_set_death_callback)
 INTERFACE_FUNCTION(__sanitizer_set_report_path)
+INTERFACE_FUNCTION(__sanitizer_set_report_fd)
 INTERFACE_FUNCTION(__sanitizer_unaligned_load16)
 INTERFACE_FUNCTION(__sanitizer_unaligned_load32)
 INTERFACE_FUNCTION(__sanitizer_unaligned_load64)
@@ -347,16 +348,20 @@ INTERFACE_FUNCTION(__sanitizer_verify_contiguous_container)
 
 // ----------------- Memory allocation functions ---------------------
 WRAP_V_W(free)
+WRAP_V_W(_free_base)
 WRAP_V_WW(_free_dbg)
 
 WRAP_W_W(malloc)
+WRAP_W_W(_malloc_base)
 WRAP_W_WWWW(_malloc_dbg)
 
 WRAP_W_WW(calloc)
+WRAP_W_WW(_calloc_base)
 WRAP_W_WWWWW(_calloc_dbg)
 WRAP_W_WWW(_calloc_impl)
 
 WRAP_W_WW(realloc)
+WRAP_W_WW(_realloc_base)
 WRAP_W_WWW(_realloc_dbg)
 WRAP_W_WWW(_recalloc)
 
@@ -392,12 +397,14 @@ INTERCEPT_LIBRARY_FUNCTION(strchr);
 INTERCEPT_LIBRARY_FUNCTION(strcmp);
 INTERCEPT_LIBRARY_FUNCTION(strcpy);  // NOLINT
 INTERCEPT_LIBRARY_FUNCTION(strcspn);
+INTERCEPT_LIBRARY_FUNCTION(strdup);
 INTERCEPT_LIBRARY_FUNCTION(strlen);
 INTERCEPT_LIBRARY_FUNCTION(strncat);
 INTERCEPT_LIBRARY_FUNCTION(strncmp);
 INTERCEPT_LIBRARY_FUNCTION(strncpy);
 INTERCEPT_LIBRARY_FUNCTION(strnlen);
 INTERCEPT_LIBRARY_FUNCTION(strpbrk);
+INTERCEPT_LIBRARY_FUNCTION(strrchr);
 INTERCEPT_LIBRARY_FUNCTION(strspn);
 INTERCEPT_LIBRARY_FUNCTION(strstr);
 INTERCEPT_LIBRARY_FUNCTION(strtol);

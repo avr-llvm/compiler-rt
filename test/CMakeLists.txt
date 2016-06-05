@@ -1,3 +1,6 @@
+# Needed for lit support
+include(AddLLVM)
+
 configure_lit_site_cfg(
   ${CMAKE_CURRENT_SOURCE_DIR}/lit.common.configured.in
   ${CMAKE_CURRENT_BINARY_DIR}/lit.common.configured)
@@ -28,7 +31,7 @@ if(NOT ANDROID)
       list(APPEND SANITIZER_COMMON_LIT_TEST_DEPS KillTheDoctor)
     endif()
   endif()
-  if(UNIX)
+  if(CMAKE_HOST_UNIX)
     list(APPEND SANITIZER_COMMON_LIT_TEST_DEPS SanitizerLintCheck)
   endif()
 endif()
@@ -66,6 +69,9 @@ if(COMPILER_RT_CAN_EXECUTE_TESTS)
   endif()
   if(COMPILER_RT_HAS_SAFESTACK)
     add_subdirectory(safestack)
+  endif()
+  if(COMPILER_RT_HAS_ESAN)
+    add_subdirectory(esan)
   endif()
 endif()
 
